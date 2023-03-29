@@ -592,11 +592,12 @@ func (sd *scyllaDialer) DialHost(ctx context.Context, host *HostInfo) (*DialedHo
 		return nil, fmt.Errorf("host missing port: %v", port)
 	}
 
-	addr := host.HostnameAndPort()
-	conn, err := sd.dialer.DialContext(ctx, "tcp", addr)
+	connAddr := host.ConnectAddressAndPort()
+	conn, err := sd.dialer.DialContext(ctx, "tcp", connAddr)
 	if err != nil {
 		return nil, err
 	}
+	addr := host.HostnameAndPort()
 	return WrapTLS(ctx, conn, addr, sd.tlsConfig)
 }
 
