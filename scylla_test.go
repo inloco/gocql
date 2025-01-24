@@ -1,3 +1,6 @@
+//go:build all || unit
+// +build all unit
+
 package gocql
 
 import (
@@ -24,7 +27,7 @@ func TestScyllaConnPickerPickNilToken(t *testing.T) {
 		s.conns = []*Conn{{
 			streams: streams.New(protoVersion4),
 		}}
-		if s.Pick(token(nil)) != s.conns[0] {
+		if s.Pick(Token(nil), nil) != s.conns[0] {
 			t.Fatal("expected connection")
 		}
 	})
@@ -33,7 +36,7 @@ func TestScyllaConnPickerPickNilToken(t *testing.T) {
 		s.conns = []*Conn{{
 			streams: streams.New(protoVersion4),
 		}}
-		if s.Pick(token(nil)) != s.conns[0] {
+		if s.Pick(Token(nil), nil) != s.conns[0] {
 			t.Fatal("expected connection")
 		}
 	})
@@ -42,20 +45,20 @@ func TestScyllaConnPickerPickNilToken(t *testing.T) {
 		s.conns = []*Conn{nil, {
 			streams: streams.New(protoVersion4),
 		}}
-		if s.Pick(token(nil)) != s.conns[1] {
+		if s.Pick(Token(nil), nil) != s.conns[1] {
 			t.Fatal("expected connection")
 		}
-		if s.Pick(token(nil)) != s.conns[1] {
+		if s.Pick(Token(nil), nil) != s.conns[1] {
 			t.Fatal("expected connection")
 		}
 	})
 
 	t.Run("multiple shards no conns", func(t *testing.T) {
 		s.conns = []*Conn{nil, nil}
-		if s.Pick(token(nil)) != nil {
+		if s.Pick(Token(nil), nil) != nil {
 			t.Fatal("expected nil")
 		}
-		if s.Pick(token(nil)) != nil {
+		if s.Pick(Token(nil), nil) != nil {
 			t.Fatal("expected nil")
 		}
 	})
@@ -64,7 +67,7 @@ func TestScyllaConnPickerPickNilToken(t *testing.T) {
 func hammerConnPicker(t *testing.T, wg *sync.WaitGroup, s *scyllaConnPicker, loops int) {
 	t.Helper()
 	for i := 0; i < loops; i++ {
-		if c := s.Pick(nil); c == nil {
+		if c := s.Pick(nil, nil); c == nil {
 			t.Error("unexpected nil")
 		}
 	}
@@ -163,7 +166,7 @@ func TestScyllaRandomConnPIcker(t *testing.T) {
 			conns:     []*Conn{nil, mockConn(1)},
 		}
 
-		if s.Pick(token(nil)) == nil {
+		if s.Pick(Token(nil), nil) == nil {
 			t.Fatal("expected connection")
 		}
 	})
@@ -187,7 +190,7 @@ func TestScyllaRandomConnPIcker(t *testing.T) {
 				defer wg.Done()
 				for i := 0; i < 3; i++ {
 					select {
-					case connCh <- s.Pick(token(nil)):
+					case connCh <- s.Pick(Token(nil), nil):
 					case <-ctx.Done():
 					}
 				}

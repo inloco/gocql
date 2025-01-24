@@ -2,24 +2,30 @@ package gocql
 
 import (
 	"context"
+	"errors"
 	"sync"
 	"time"
 )
 
 type ExecutableQuery interface {
+	borrowForExecution()    // Used to ensure that the query stays alive for lifetime of a particular execution goroutine.
+	releaseAfterExecution() // Used when a goroutine finishes its execution attempts, either with ok result or an error.
 	execute(ctx context.Context, conn *Conn) *Iter
 	attempt(keyspace string, end, start time.Time, iter *Iter, host *HostInfo)
 	retryPolicy() RetryPolicy
 	speculativeExecutionPolicy() SpeculativeExecutionPolicy
 	GetRoutingKey() ([]byte, error)
 	Keyspace() string
+	Table() string
 	IsIdempotent() bool
 	IsLWT() bool
-	GetCustomPartitioner() partitioner
+	GetCustomPartitioner() Partitioner
 
 	withContext(context.Context) ExecutableQuery
 
 	RetryableQuery
+
+	GetSession() *Session
 }
 
 type queryExecutor struct {
@@ -45,6 +51,7 @@ func (q *queryExecutor) speculate(ctx context.Context, qry ExecutableQuery, sp S
 	for i := 0; i < sp.Attempts(); i++ {
 		select {
 		case <-ticker.C:
+			qry.borrowForExecution() // ensure liveness in case of executing Query to prevent races with Query.Release().
 			go q.run(ctx, qry, hostIter, results)
 		case <-ctx.Done():
 			return &Iter{err: ctx.Err()}
@@ -82,6 +89,7 @@ func (q *queryExecutor) executeQuery(qry ExecutableQuery) (*Iter, error) {
 	results := make(chan *Iter, 1)
 
 	// Launch the main execution
+	qry.borrowForExecution() // ensure liveness in case of executing Query to prevent races with Query.Release().
 	go q.run(ctx, qry, hostIter, results)
 
 	// The speculative executions are launched _in addition_ to the main
@@ -100,52 +108,107 @@ func (q *queryExecutor) executeQuery(qry ExecutableQuery) (*Iter, error) {
 }
 
 func (q *queryExecutor) do(ctx context.Context, qry ExecutableQuery, hostIter NextHost) *Iter {
-	selectedHost := hostIter()
 	rt := qry.retryPolicy()
+	if rt == nil {
+		rt = &SimpleRetryPolicy{3}
+	}
 
-	var lastErr error
-	var iter *Iter
-	for selectedHost != nil {
+	lwtRT, isRTSupportsLWT := rt.(LWTRetryPolicy)
+
+	var getShouldRetry func(qry RetryableQuery) bool
+	var getRetryType func(error) RetryType
+
+	if isRTSupportsLWT && qry.IsLWT() {
+		getShouldRetry = lwtRT.AttemptLWT
+		getRetryType = lwtRT.GetRetryTypeLWT
+	} else {
+		getShouldRetry = rt.Attempt
+		getRetryType = rt.GetRetryType
+	}
+
+	var potentiallyExecuted bool
+
+	execute := func(qry ExecutableQuery, selectedHost SelectedHost) (iter *Iter, retry RetryType) {
 		host := selectedHost.Info()
 		if host == nil || !host.IsUp() {
-			selectedHost = hostIter()
-			continue
+			return &Iter{
+				err: &QueryError{
+					err:                 ErrHostDown,
+					potentiallyExecuted: potentiallyExecuted,
+				},
+			}, RetryNextHost
 		}
-
 		pool, ok := q.pool.getPool(host)
 		if !ok {
-			selectedHost = hostIter()
-			continue
+			return &Iter{
+				err: &QueryError{
+					err:                 ErrNoPool,
+					potentiallyExecuted: potentiallyExecuted,
+				},
+			}, RetryNextHost
 		}
-
-		conn := pool.Pick(selectedHost.Token())
+		conn := pool.Pick(selectedHost.Token(), qry)
 		if conn == nil {
-			selectedHost = hostIter()
-			continue
+			return &Iter{
+				err: &QueryError{
+					err:                 ErrNoConnectionsInPool,
+					potentiallyExecuted: potentiallyExecuted,
+				},
+			}, RetryNextHost
 		}
-
 		iter = q.attemptQuery(ctx, qry, conn)
 		iter.host = selectedHost.Info()
 		// Update host
-		switch iter.err {
-		case context.Canceled, context.DeadlineExceeded, ErrNotFound:
-			// those errors represents logical errors, they should not count
-			// toward removing a node from the pool
-			selectedHost.Mark(nil)
-			return iter
-		default:
-			selectedHost.Mark(iter.err)
+		if iter.err == nil {
+			return iter, RetryType(255)
 		}
 
-		// Exit if the query was successful
-		// or no retry policy defined or retry attempts were reached
-		if iter.err == nil || rt == nil || !rt.Attempt(qry) {
+		switch {
+		case errors.Is(iter.err, context.Canceled),
+			errors.Is(iter.err, context.DeadlineExceeded):
+			selectedHost.Mark(nil)
+			potentiallyExecuted = true
+			retry = Rethrow
+		default:
+			selectedHost.Mark(iter.err)
+			retry = RetryType(255) // Don't enforce retry and get it from retry policy
+		}
+
+		var qErr *QueryError
+		if errors.As(iter.err, &qErr) {
+			potentiallyExecuted = potentiallyExecuted && qErr.PotentiallyExecuted()
+			qErr.potentiallyExecuted = potentiallyExecuted
+			qErr.isIdempotent = qry.IsIdempotent()
+			iter.err = qErr
+		} else {
+			iter.err = &QueryError{
+				err:                 iter.err,
+				potentiallyExecuted: potentiallyExecuted,
+				isIdempotent:        qry.IsIdempotent(),
+			}
+		}
+		return iter, retry
+	}
+
+	var lastErr error
+	selectedHost := hostIter()
+	for selectedHost != nil {
+		iter, retryType := execute(qry, selectedHost)
+		if iter.err == nil {
 			return iter
 		}
 		lastErr = iter.err
 
+		// Exit if retry policy decides to not retry anymore
+		if retryType == RetryType(255) {
+			if !getShouldRetry(qry) {
+				return iter
+			}
+			retryType = getRetryType(iter.err)
+		}
+
 		// If query is unsuccessful, check the error with RetryPolicy to retry
-		switch rt.GetRetryType(iter.err) {
+		switch retryType {
 		case Retry:
 			// retry on the same host
 			continue
@@ -160,11 +223,9 @@ func (q *queryExecutor) do(ctx context.Context, qry ExecutableQuery, hostIter Ne
 			return &Iter{err: ErrUnknownRetryType}
 		}
 	}
-
 	if lastErr != nil {
 		return &Iter{err: lastErr}
 	}
-
 	return &Iter{err: ErrNoConnections}
 }
 
@@ -173,4 +234,5 @@ func (q *queryExecutor) run(ctx context.Context, qry ExecutableQuery, hostIter N
 	case results <- q.do(ctx, qry, hostIter):
 	case <-ctx.Done():
 	}
+	qry.releaseAfterExecution()
 }

@@ -12,13 +12,14 @@ import (
 	"math/big"
 	"net"
 	"reflect"
+	"sort"
 	"strconv"
 	"strings"
 	"testing"
 	"time"
 	"unicode"
 
-	inf "gopkg.in/inf.v0"
+	"gopkg.in/inf.v0"
 )
 
 func TestEmptyHosts(t *testing.T) {
@@ -104,7 +105,7 @@ func TestTracing(t *testing.T) {
 	}
 
 	buf := &bytes.Buffer{}
-	trace := &traceWriter{session: session, w: buf}
+	trace := &TraceWriter{session: session, w: buf}
 	if err := session.Query(`INSERT INTO trace (id) VALUES (?)`, 42).Trace(trace).Exec(); err != nil {
 		t.Fatal("insert:", err)
 	} else if buf.Len() == 0 {
@@ -312,6 +313,143 @@ func TestPaging(t *testing.T) {
 	}
 }
 
+func TestPagingWithAllowFiltering(t *testing.T) {
+	session := createSession(t)
+
+	t.Cleanup(func() {
+		if err := session.Query("DROP TABLE gocql_test.pagging_with_allow_filtering").Exec(); err != nil {
+			t.Fatal("drop table:", err)
+		}
+		session.Close()
+	})
+
+	if session.cfg.ProtoVersion == 1 {
+		t.Skip("Paging not supported. Please use Cassandra >= 2.0")
+	}
+
+	const (
+		targetP1             = 50
+		targetP2             = 50
+		totalExpectedResults = 30
+		pageSize             = 5
+		deletedRageStart     = 10
+		deletedRageEnd       = 20
+		// Some record range is being deleted, to test tombstones appearance
+		expectedCount = totalExpectedResults - (deletedRageEnd - deletedRageStart)
+	)
+
+	paginatedSelect := fmt.Sprintf("SELECT c1, f1 FROM gocql_test.pagging_with_allow_filtering WHERE p1 = %d AND p2 = %d AND f1 < %d ALLOW FILTERING;", targetP1, targetP2, totalExpectedResults)
+	validateResult := func(t *testing.T, results []int) {
+		if len(results) != expectedCount {
+			t.Fatalf("expected %d got %d: %d", expectedCount, len(results), results)
+		}
+
+		sort.Ints(results)
+
+		expect := make([]int, 0, expectedCount)
+		for i := 0; i < totalExpectedResults; i++ {
+			if i >= deletedRageStart && i < deletedRageEnd {
+				continue
+			}
+			expect = append(expect, i)
+		}
+
+		if !reflect.DeepEqual(results, expect) {
+			t.Fatalf("expected %v\ngot %v", expect, results)
+		}
+	}
+
+	t.Run("Prepare", func(t *testing.T) {
+		if err := createTable(session,
+			"CREATE TABLE gocql_test.pagging_with_allow_filtering (p1 int, p2 int, c1 int, f1 int, "+
+				"PRIMARY KEY ((p1, p2), c1)) WITH CLUSTERING ORDER BY (c1 DESC)"); err != nil {
+			t.Fatal("create table:", err)
+		}
+
+		// Insert extra records
+		for i := 0; i < 100; i++ {
+			if err := session.Query("INSERT INTO gocql_test.pagging_with_allow_filtering (p1,p2,c1,f1) VALUES (?,?,?,?)", i, i, i, i).Exec(); err != nil {
+				t.Fatal("insert:", err)
+			}
+		}
+
+		// Insert records to a target partition
+		for i := 0; i < 100; i++ {
+			if err := session.Query("INSERT INTO gocql_test.pagging_with_allow_filtering (p1,p2,c1,f1) VALUES (?,?,?,?)", targetP1, targetP2, i, i).Exec(); err != nil {
+				t.Fatal("insert:", err)
+			}
+		}
+
+		if err := session.Query("DELETE FROM gocql_test.pagging_with_allow_filtering WHERE p1 = ? AND p2 = ? AND c1 >= ? AND c1 < ?", targetP1, targetP2, deletedRageStart, deletedRageEnd).Exec(); err != nil {
+			t.Fatal("insert:", err)
+		}
+	})
+
+	t.Run("AutoPagination", func(t *testing.T) {
+		for _, c := range []Consistency{One, Quorum} {
+			t.Run(c.String(), func(t *testing.T) {
+				iter := session.Query(paginatedSelect).Consistency(c).PageSize(pageSize).Iter()
+
+				var c1, f1 int
+				var results []int
+
+				for iter.Scan(&c1, &f1) {
+					if c1 != f1 {
+						t.Fatalf("expected c1 and f1 values to be the same, but got c1=%d f1=%d", c1, f1)
+					}
+					results = append(results, f1)
+				}
+				if err := iter.Close(); err != nil {
+					t.Fatal("select:", err.Error())
+				}
+				validateResult(t, results)
+			})
+		}
+	})
+
+	t.Run("ManualPagination", func(t *testing.T) {
+		for _, c := range []Consistency{One, Quorum} {
+			t.Run(c.String(), func(t *testing.T) {
+
+				var c1, f1 int
+				var results []int
+				var currentPageState []byte
+
+				qry := session.Query(paginatedSelect).Consistency(c).PageSize(pageSize)
+
+				for {
+					iter := qry.PageState(currentPageState).Iter()
+
+					// Here we make sure that all iterator, but last one have some data in it
+					if !iter.LastPage() && iter.NumRows() == 0 {
+						t.Errorf("expected at least one row, but got 0")
+					}
+					for iter.Scan(&c1, &f1) {
+						if c1 != f1 {
+							t.Fatalf("expected c1 and f1 values to be the same, but got c1=%d f1=%d", c1, f1)
+						}
+						results = append(results, f1)
+					}
+					if err := iter.Close(); err != nil {
+						t.Fatal("select:", err.Error())
+					}
+					if iter.LastPage() {
+						break
+					}
+					newPageState := iter.PageState()
+					if len(currentPageState) == len(newPageState) && bytes.Compare(newPageState, currentPageState) == 0 {
+						t.Fatalf("page state did not change")
+					}
+					currentPageState = newPageState
+				}
+
+				validateResult(t, results)
+			})
+		}
+	})
+
+}
+
 func TestPagingWithBind(t *testing.T) {
 	session := createSession(t)
 	defer session.Close()
@@ -427,7 +565,7 @@ func TestCAS(t *testing.T) {
 		t.Fatal("truncate:", err)
 	}
 
-	successBatch := session.NewBatch(LoggedBatch)
+	successBatch := session.Batch(LoggedBatch)
 	successBatch.Query("INSERT INTO cas_table (title, revid, last_modified) VALUES (?, ?, ?) IF NOT EXISTS", title, revid, modified)
 	if applied, _, err := session.ExecuteBatchCAS(successBatch, &titleCAS, &revidCAS, &modifiedCAS); err != nil {
 		t.Fatal("insert:", err)
@@ -435,7 +573,7 @@ func TestCAS(t *testing.T) {
 		t.Fatalf("insert should have been applied: title=%v revID=%v modified=%v", titleCAS, revidCAS, modifiedCAS)
 	}
 
-	successBatch = session.NewBatch(LoggedBatch)
+	successBatch = session.Batch(LoggedBatch)
 	successBatch.Query("INSERT INTO cas_table (title, revid, last_modified) VALUES (?, ?, ?) IF NOT EXISTS", title+"_foo", revid, modified)
 	casMap := make(map[string]interface{})
 	if applied, _, err := session.MapExecuteBatchCAS(successBatch, casMap); err != nil {
@@ -444,7 +582,7 @@ func TestCAS(t *testing.T) {
 		t.Fatal("insert should have been applied")
 	}
 
-	failBatch := session.NewBatch(LoggedBatch)
+	failBatch := session.Batch(LoggedBatch)
 	failBatch.Query("INSERT INTO cas_table (title, revid, last_modified) VALUES (?, ?, ?) IF NOT EXISTS", title, revid, modified)
 	if applied, _, err := session.ExecuteBatchCAS(successBatch, &titleCAS, &revidCAS, &modifiedCAS); err != nil {
 		t.Fatal("insert:", err)
@@ -452,14 +590,14 @@ func TestCAS(t *testing.T) {
 		t.Fatalf("insert should have been applied: title=%v revID=%v modified=%v", titleCAS, revidCAS, modifiedCAS)
 	}
 
-	insertBatch := session.NewBatch(LoggedBatch)
+	insertBatch := session.Batch(LoggedBatch)
 	insertBatch.Query("INSERT INTO cas_table (title, revid, last_modified) VALUES ('_foo', 2c3af400-73a4-11e5-9381-29463d90c3f0, DATEOF(NOW()))")
 	insertBatch.Query("INSERT INTO cas_table (title, revid, last_modified) VALUES ('_foo', 3e4ad2f1-73a4-11e5-9381-29463d90c3f0, DATEOF(NOW()))")
 	if err := session.ExecuteBatch(insertBatch); err != nil {
 		t.Fatal("insert:", err)
 	}
 
-	failBatch = session.NewBatch(LoggedBatch)
+	failBatch = session.Batch(LoggedBatch)
 	failBatch.Query("UPDATE cas_table SET last_modified = DATEOF(NOW()) WHERE title='_foo' AND revid=2c3af400-73a4-11e5-9381-29463d90c3f0 IF last_modified=DATEOF(NOW());")
 	failBatch.Query("UPDATE cas_table SET last_modified = DATEOF(NOW()) WHERE title='_foo' AND revid=3e4ad2f1-73a4-11e5-9381-29463d90c3f0 IF last_modified=DATEOF(NOW());")
 	if applied, iter, err := session.ExecuteBatchCAS(failBatch, &titleCAS, &revidCAS, &modifiedCAS); err != nil {
@@ -584,7 +722,7 @@ func TestBatch(t *testing.T) {
 		t.Fatal("create table:", err)
 	}
 
-	batch := session.NewBatch(LoggedBatch)
+	batch := session.Batch(LoggedBatch)
 	for i := 0; i < 100; i++ {
 		batch.Query(`INSERT INTO batch_table (id) VALUES (?)`, i)
 	}
@@ -616,9 +754,9 @@ func TestUnpreparedBatch(t *testing.T) {
 
 	var batch *Batch
 	if session.cfg.ProtoVersion == 2 {
-		batch = session.NewBatch(CounterBatch)
+		batch = session.Batch(CounterBatch)
 	} else {
-		batch = session.NewBatch(UnloggedBatch)
+		batch = session.Batch(UnloggedBatch)
 	}
 
 	for i := 0; i < 100; i++ {
@@ -657,7 +795,7 @@ func TestBatchLimit(t *testing.T) {
 		t.Fatal("create table:", err)
 	}
 
-	batch := session.NewBatch(LoggedBatch)
+	batch := session.Batch(LoggedBatch)
 	for i := 0; i < 65537; i++ {
 		batch.Query(`INSERT INTO batch_table2 (id) VALUES (?)`, i)
 	}
@@ -711,7 +849,7 @@ func TestTooManyQueryArgs(t *testing.T) {
 		t.Fatal("'`SELECT * FROM too_many_query_args WHERE id = ?`, 1, 2' should return an error")
 	}
 
-	batch := session.NewBatch(UnloggedBatch)
+	batch := session.Batch(UnloggedBatch)
 	batch.Query("INSERT INTO too_many_query_args (id, value) VALUES (?, ?)", 1, 2, 3)
 	err = session.ExecuteBatch(batch)
 
@@ -743,7 +881,7 @@ func TestNotEnoughQueryArgs(t *testing.T) {
 		t.Fatal("'`SELECT * FROM not_enough_query_args WHERE id = ? and cluster = ?`, 1' should return an error")
 	}
 
-	batch := session.NewBatch(UnloggedBatch)
+	batch := session.Batch(UnloggedBatch)
 	batch.Query("INSERT INTO not_enough_query_args (id, cluster, value) VALUES (?, ?, ?)", 1, 2)
 	err = session.ExecuteBatch(batch)
 
@@ -781,7 +919,7 @@ func TestReconnection(t *testing.T) {
 	session := createSessionFromCluster(cluster, t)
 	defer session.Close()
 
-	h := session.ring.allHosts()[0]
+	h := session.hostSource.getHostsList()[0]
 	session.handleNodeDown(h.ConnectAddress(), h.Port())
 
 	if h.State() != NodeDown {
@@ -1316,7 +1454,7 @@ func TestBatchQueryInfo(t *testing.T) {
 		return values, nil
 	}
 
-	batch := session.NewBatch(LoggedBatch)
+	batch := session.Batch(LoggedBatch)
 	batch.Bind("INSERT INTO batch_query_info (id, cluster, value) VALUES (?, ?,?)", write)
 
 	if err := session.ExecuteBatch(batch); err != nil {
@@ -1444,7 +1582,7 @@ func TestPrepare_ReprepareBatch(t *testing.T) {
 	}
 
 	stmt, conn := injectInvalidPreparedStatement(t, session, "test_reprepare_statement_batch")
-	batch := session.NewBatch(UnloggedBatch)
+	batch := session.Batch(UnloggedBatch)
 	batch.Query(stmt, "bar")
 	if err := conn.executeBatch(ctx, batch).Close(); err != nil {
 		t.Fatalf("Failed to execute query for reprepare statement: %v", err)
@@ -1537,7 +1675,7 @@ func TestPrepare_PreparedCacheEviction(t *testing.T) {
 	}
 
 	// Walk through all the configured hosts and test cache retention and eviction
-	for _, host := range session.ring.hosts {
+	for _, host := range session.hostSource.hosts {
 		_, ok := session.stmtsLRU.lru.Get(session.stmtsLRU.keyFor(host.HostID(), session.cfg.Keyspace, "SELECT id,mod FROM prepcachetest WHERE id = 0"))
 		if ok {
 			t.Errorf("expected first select to be purged but was in cache for host=%q", host)
@@ -1762,8 +1900,8 @@ func TestVarint(t *testing.T) {
 	}
 
 	err := session.Query("SELECT test FROM varint_test").Scan(&result64)
-	if err == nil || strings.Index(err.Error(), "out of range") == -1 {
-		t.Errorf("expected out of range error since value is too big for int64")
+	if err == nil || strings.Index(err.Error(), "the data value should be in the int64 range") == -1 {
+		t.Errorf("expected out of range error since value is too big for int64, result:%d", result64)
 	}
 
 	// value not set in cassandra, leave bind variable empty
@@ -1828,7 +1966,7 @@ func TestBatchStats(t *testing.T) {
 		t.Fatalf("failed to create table with error '%v'", err)
 	}
 
-	b := session.NewBatch(LoggedBatch)
+	b := session.Batch(LoggedBatch)
 	b.Query("INSERT INTO batchStats (id) VALUES (?)", 1)
 	b.Query("INSERT INTO batchStats (id) VALUES (?)", 2)
 
@@ -1871,7 +2009,7 @@ func TestBatchObserve(t *testing.T) {
 
 	var observedBatch *observation
 
-	batch := session.NewBatch(LoggedBatch)
+	batch := session.Batch(LoggedBatch)
 	batch.Observer(funcBatchObserver(func(ctx context.Context, o ObservedBatch) {
 		if observedBatch != nil {
 			t.Fatal("batch observe called more than once")
@@ -1937,7 +2075,9 @@ func TestNilInQuery(t *testing.T) {
 
 // Don't initialize time.Time bind variable if cassandra timestamp column is empty
 func TestEmptyTimestamp(t *testing.T) {
+	zeroTimestamp := time.UnixMilli(0).UTC()
 	session := createSession(t)
+
 	defer session.Close()
 
 	if err := createTable(session, "CREATE TABLE gocql_test.test_empty_timestamp (id int, time timestamp, num int, PRIMARY KEY (id))"); err != nil {
@@ -1954,8 +2094,54 @@ func TestEmptyTimestamp(t *testing.T) {
 		t.Fatalf("failed to select with err: %v", err)
 	}
 
-	if !timeVal.IsZero() {
-		t.Errorf("time.Time bind variable should still be empty (was %s)", timeVal)
+	if !timeVal.Equal(zeroTimestamp) {
+		t.Errorf("time.Time bind variable should be zero (was %s)", timeVal)
+	}
+}
+
+// Integration test of just querying for data from the system.schema_keyspace table where the keyspace DOES exist.
+func TestGetKeyspaceMetadata(t *testing.T) {
+	session := createSession(t)
+	defer session.Close()
+
+	keyspaceMetadata, err := getKeyspaceMetadata(session, "gocql_test")
+	if err != nil {
+		t.Fatalf("failed to query the keyspace metadata with err: %v", err)
+	}
+	if keyspaceMetadata == nil {
+		t.Fatal("failed to query the keyspace metadata, nil returned")
+	}
+	if keyspaceMetadata.Name != "gocql_test" {
+		t.Errorf("Expected keyspace name to be 'gocql' but was '%s'", keyspaceMetadata.Name)
+	}
+	if keyspaceMetadata.StrategyClass != "org.apache.cassandra.locator.NetworkTopologyStrategy" {
+		t.Errorf("Expected replication strategy class to be 'org.apache.cassandra.locator.NetworkTopologyStrategy' but was '%s'", keyspaceMetadata.StrategyClass)
+	}
+	if keyspaceMetadata.StrategyOptions == nil {
+		t.Error("Expected replication strategy options map but was nil")
+	}
+	rfStr, ok := keyspaceMetadata.StrategyOptions["datacenter1"]
+	if !ok {
+		t.Fatalf("Expected strategy option 'datacenter1' but was not found in %v", keyspaceMetadata.StrategyOptions)
+	}
+	rfInt, err := strconv.Atoi(rfStr.(string))
+	if err != nil {
+		t.Fatalf("Error converting string to int with err: %v", err)
+	}
+	if rfInt != *flagRF {
+		t.Errorf("Expected replication factor to be %d but was %d", *flagRF, rfInt)
+	}
+}
+
+// Integration test of just querying for data from the system.schema_keyspace table where the keyspace DOES NOT exist.
+func TestGetKeyspaceMetadataFails(t *testing.T) {
+	session := createSession(t)
+	defer session.Close()
+
+	_, err := getKeyspaceMetadata(session, "gocql_keyspace_does_not_exist")
+
+	if err != ErrKeyspaceDoesNotExist || err == nil {
+		t.Fatalf("Expected error of type ErrKeySpaceDoesNotExist. Instead, error was %v", err)
 	}
 }
 
@@ -2089,7 +2275,7 @@ func TestTokenAwareConnPool(t *testing.T) {
 	session := createSessionFromCluster(cluster, t)
 	defer session.Close()
 
-	expectedPoolSize := cluster.NumConns * len(session.ring.allHosts())
+	expectedPoolSize := cluster.NumConns * len(session.hostSource.getHostsList())
 
 	// wait for pool to fill
 	for i := 0; i < 50; i++ {
@@ -2179,7 +2365,7 @@ func TestManualQueryPaging(t *testing.T) {
 			fetched++
 		}
 
-		if len(iter.PageState()) > 0 {
+		if !iter.LastPage() {
 			// more pages
 			iter = query.PageState(iter.PageState()).Iter()
 		} else {
@@ -2446,7 +2632,7 @@ func TestUnsetColBatch(t *testing.T) {
 		t.Fatalf("failed to create table with error '%v'", err)
 	}
 
-	b := session.NewBatch(LoggedBatch)
+	b := session.Batch(LoggedBatch)
 	b.Query("INSERT INTO gocql_test.batchUnsetInsert(id, my_int, my_text) VALUES (?,?,?)", 1, 1, UnsetValue)
 	b.Query("INSERT INTO gocql_test.batchUnsetInsert(id, my_int, my_text) VALUES (?,?,?)", 1, UnsetValue, "")
 	b.Query("INSERT INTO gocql_test.batchUnsetInsert(id, my_int, my_text) VALUES (?,?,?)", 2, 2, UnsetValue)

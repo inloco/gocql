@@ -1,5 +1,5 @@
-//go:build all || cassandra
-// +build all cassandra
+//go:build all || unit
+// +build all unit
 
 package gocql
 
@@ -66,6 +66,25 @@ func TestIsValidPeer(t *testing.T) {
 	host.rack = ""
 	if isValidPeer(host) {
 		t.Errorf("expected %+v to NOT be a valid peer", host)
+	}
+}
+
+func TestIsZeroToken(t *testing.T) {
+	host := &HostInfo{
+		rpcAddress: net.ParseIP("0.0.0.0"),
+		rack:       "myRack",
+		hostId:     "0",
+		dataCenter: "datacenter",
+		tokens:     []string{"0", "1"},
+	}
+
+	if isZeroToken(host) {
+		t.Errorf("expected %+v to NOT be a zero-token host", host)
+	}
+
+	host.tokens = []string{}
+	if !isZeroToken(host) {
+		t.Errorf("expected %+v to be a zero-token host", host)
 	}
 }
 

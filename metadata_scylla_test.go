@@ -1,4 +1,5 @@
-// +build !cassandra
+//go:build !cassandra && unit
+// +build !cassandra,unit
 
 // Copyright (c) 2015 The gocql Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style
@@ -112,7 +113,7 @@ func TestCompileMetadata(t *testing.T) {
 			ViewName:     "sec_idx_index",
 		},
 	}
-	compileMetadata(keyspace, tables, columns, nil, nil, nil, indexes, views)
+	compileMetadata(keyspace, tables, columns, nil, nil, nil, indexes, views, nil)
 	assertKeyspaceMetadata(
 		t,
 		keyspace,

@@ -1,7 +1,6 @@
 package gocql
 
 import (
-	"context"
 	"errors"
 	"fmt"
 	"net"
@@ -10,6 +9,9 @@ import (
 	"sync"
 	"time"
 )
+
+var ErrCannotFindHost = errors.New("cannot find host")
+var ErrHostAlreadyExists = errors.New("host already exists")
 
 type nodeState int32
 
@@ -142,7 +144,7 @@ func (h *HostInfo) Equal(host *HostInfo) bool {
 		return true
 	}
 
-	return h.ConnectAddress().Equal(host.ConnectAddress())
+	return h.HostID() == host.HostID() && h.ConnectAddressAndPort() == host.ConnectAddressAndPort()
 }
 
 func (h *HostInfo) Peer() net.IP {
@@ -406,10 +408,31 @@ func (h *HostInfo) IsUp() bool {
 	return h != nil && h.State() == NodeUp
 }
 
+func (h *HostInfo) IsBusy(s *Session) bool {
+	pool, ok := s.pool.getPool(h)
+	return ok && h != nil && pool.InFlight() >= MAX_IN_FLIGHT_THRESHOLD
+}
+
 func (h *HostInfo) HostnameAndPort() string {
+	// Fast path: in most cases hostname is not empty
+	var (
+		hostname string
+		port     int
+	)
+	h.mu.RLock()
+	hostname = h.hostname
+	port = h.port
+	h.mu.RUnlock()
+
+	if hostname != "" {
+		return net.JoinHostPort(hostname, strconv.Itoa(port))
+	}
+
+	// Slow path: hostname is empty
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	if h.hostname == "" {
+	if h.hostname == "" { // recheck is hostname empty
+		// if yes - fill it
 		addr, _ := h.connectAddressLocked()
 		h.hostname = addr.String()
 	}
@@ -417,6 +440,17 @@ func (h *HostInfo) HostnameAndPort() string {
 }
 
 func (h *HostInfo) Hostname() string {
+	// Fast path: in most cases hostname is not empty
+	var hostname string
+	h.mu.RLock()
+	hostname = h.hostname
+	h.mu.RUnlock()
+
+	if hostname != "" {
+		return hostname
+	}
+
+	// Slow path: hostname is empty
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	if h.hostname == "" {
@@ -427,10 +461,10 @@ func (h *HostInfo) Hostname() string {
 }
 
 func (h *HostInfo) ConnectAddressAndPort() string {
-        h.mu.Lock()
-        defer h.mu.Unlock()
-        addr, _ := h.connectAddressLocked()
-        return net.JoinHostPort(addr.String(), strconv.Itoa(h.port))
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	addr, _ := h.connectAddressLocked()
+	return net.JoinHostPort(addr.String(), strconv.Itoa(h.port))
 }
 
 func (h *HostInfo) String() string {
@@ -469,17 +503,9 @@ func (h *HostInfo) ScyllaShardAwarePortTLS() uint16 {
 	return h.scyllaShardAwarePortTLS
 }
 
-// Polls system.peers at a specific interval to find new hosts
-type ringDescriber struct {
-	session         *Session
-	mu              sync.Mutex
-	prevHosts       []*HostInfo
-	prevPartitioner string
-}
-
 // Returns true if we are using system_schema.keyspaces instead of system.schema_keyspaces
-func checkSystemSchema(control *controlConn) (bool, error) {
-	iter := control.query("SELECT * FROM system_schema.keyspaces")
+func checkSystemSchema(control controlConnection) (bool, error) {
+	iter := control.query("SELECT * FROM system_schema.keyspaces" + control.getSession().usingTimeoutClause)
 	if err := iter.err; err != nil {
 		if errf, ok := err.(*errorFrame); ok {
 			if errf.code == ErrCodeSyntax {
@@ -495,7 +521,7 @@ func checkSystemSchema(control *controlConn) (bool, error) {
 
 // Given a map that represents a row from either system.local or system.peers
 // return as much information as we can in *HostInfo
-func (s *Session) hostInfoFromMap(row map[string]interface{}, host *HostInfo) (*HostInfo, error) {
+func hostInfoFromMap(row map[string]interface{}, host *HostInfo, translateAddressPort func(addr net.IP, port int) (net.IP, int)) (*HostInfo, error) {
 	const assertErrorMsg = "Assertion failed for %s"
 	var ok bool
 
@@ -608,156 +634,89 @@ func (s *Session) hostInfoFromMap(row map[string]interface{}, host *HostInfo) (*
 	}
 
 	host.untranslatedConnectAddress = host.ConnectAddress()
-	ip, port := s.cfg.translateAddressPort(host.untranslatedConnectAddress, host.port)
+	ip, port := translateAddressPort(host.untranslatedConnectAddress, host.port)
 	host.connectAddress = ip
 	host.port = port
 
 	return host, nil
 }
 
-// Ask the control node for host info on all it's known peers
-func (r *ringDescriber) getClusterPeerInfo() ([]*HostInfo, error) {
-	var hosts []*HostInfo
-	iter := r.session.control.withConnHost(func(ch *connHost) *Iter {
-		hosts = append(hosts, ch.host)
-		return ch.conn.querySystemPeers(context.TODO(), ch.host.version)
-	})
-
-	if iter == nil {
-		return nil, errNoControl
-	}
-
+func hostInfoFromIter(iter *Iter, connectAddress net.IP, defaultPort int, translateAddressPort func(addr net.IP, port int) (net.IP, int)) (*HostInfo, error) {
 	rows, err := iter.SliceMap()
 	if err != nil {
 		// TODO(zariel): make typed error
-		return nil, fmt.Errorf("unable to fetch peer host info: %s", err)
+		return nil, err
 	}
 
-	for _, row := range rows {
-		// extract all available info about the peer
-		host, err := r.session.hostInfoFromMap(row, &HostInfo{port: r.session.cfg.Port})
-		if err != nil {
-			return nil, err
-		} else if !isValidPeer(host) {
-			// If it's not a valid peer
-			r.session.logger.Printf("Found invalid peer '%s' "+
-				"Likely due to a gossip or snitch issue, this host will be ignored", host)
-			continue
-		}
-
-		hosts = append(hosts, host)
+	if len(rows) == 0 {
+		return nil, errors.New("query returned 0 rows")
 	}
 
-	return hosts, nil
-}
-
-// Return true if the host is a valid peer
-func isValidPeer(host *HostInfo) bool {
-	return !(len(host.RPCAddress()) == 0 ||
-		host.hostId == "" ||
-		host.dataCenter == "" ||
-		host.rack == "" ||
-		len(host.tokens) == 0)
-}
-
-// Return a list of hosts the cluster knows about
-func (r *ringDescriber) GetHosts() ([]*HostInfo, string, error) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-
-	hosts, err := r.getClusterPeerInfo()
+	host, err := hostInfoFromMap(rows[0], &HostInfo{connectAddress: connectAddress, port: defaultPort}, translateAddressPort)
 	if err != nil {
-		return r.prevHosts, r.prevPartitioner, err
+		return nil, err
 	}
-
-	var partitioner string
-	if len(hosts) > 0 {
-		partitioner = hosts[0].Partitioner()
-	}
-
-	return hosts, partitioner, nil
-}
-
-// Given an ip/port return HostInfo for the specified ip/port
-func (r *ringDescriber) getHostInfo(hostID UUID) (*HostInfo, error) {
-	var host *HostInfo
-	for _, table := range []string{"system.peers", "system.local"} {
-		iter := r.session.control.withConnHost(func(ch *connHost) *Iter {
-			if ch.host.HostID() == hostID.String() {
-				host = ch.host
-				return nil
-			}
-
-			if table == "system.peers" {
-				return ch.conn.querySystemPeers(context.TODO(), ch.host.version)
-			} else {
-				return ch.conn.query(context.TODO(), fmt.Sprintf("SELECT * FROM %s", table))
-			}
-		})
-
-		if iter != nil {
-			rows, err := iter.SliceMap()
-			if err != nil {
-				return nil, err
-			}
-
-			for _, row := range rows {
-				h, err := r.session.hostInfoFromMap(row, &HostInfo{port: r.session.cfg.Port})
-				if err != nil {
-					return nil, err
-				}
-
-				if h.HostID() == hostID.String() {
-					host = h
-					break
-				}
-			}
-		}
-	}
-
-	if host == nil {
-		return nil, errors.New("unable to fetch host info: invalid control connection")
-	} else if host.invalidConnectAddr() {
-		return nil, fmt.Errorf("host ConnectAddress invalid ip=%v: %v", host.connectAddress, host)
-	}
-
 	return host, nil
 }
 
-func (r *ringDescriber) refreshRing() error {
-	// if we have 0 hosts this will return the previous list of hosts to
-	// attempt to reconnect to the cluster otherwise we would never find
-	// downed hosts again, could possibly have an optimisation to only
-	// try to add new hosts if GetHosts didnt error and the hosts didnt change.
-	hosts, partitioner, err := r.GetHosts()
+// debounceRingRefresh submits a ring refresh request to the ring refresh debouncer.
+func (s *Session) debounceRingRefresh() {
+	s.ringRefresher.Debounce()
+}
+
+// refreshRing executes a ring refresh immediately and cancels pending debounce ring refresh requests.
+func (s *Session) refreshRingNow() error {
+	err, ok := <-s.ringRefresher.RefreshNow()
+	if !ok {
+		return errors.New("could not refresh ring because stop was requested")
+	}
+
+	return err
+}
+
+func (s *Session) refreshRing() error {
+	hosts, partitioner, err := s.hostSource.GetHostsFromSystem()
 	if err != nil {
 		return err
 	}
+	prevHosts := s.hostSource.getHostsMap()
 
-	prevHosts := r.session.ring.currentHosts()
-
-	// TODO: move this to session
 	for _, h := range hosts {
-		if r.session.cfg.filterHost(h) {
+		if s.cfg.filterHost(h) {
 			continue
 		}
 
-		if host, ok := r.session.ring.addHostIfMissing(h); !ok {
-			r.session.startPoolFill(h)
+		if host, ok := s.hostSource.addHostIfMissing(h); !ok {
+			s.startPoolFill(h)
 		} else {
-			host.update(h)
+			// host (by hostID) already exists; determine if IP has changed
+			newHostID := h.HostID()
+			existing, ok := prevHosts[newHostID]
+			if !ok {
+				return fmt.Errorf("get existing host=%s from prevHosts: %w", h, ErrCannotFindHost)
+			}
+			if h.connectAddress.Equal(existing.connectAddress) && h.nodeToNodeAddress().Equal(existing.nodeToNodeAddress()) {
+				// no host IP change
+				host.update(h)
+			} else {
+				// host IP has changed
+				// remove old HostInfo (w/old IP)
+				s.removeHost(existing)
+				if _, alreadyExists := s.hostSource.addHostIfMissing(h); alreadyExists {
+					return fmt.Errorf("add new host=%s after removal: %w", h, ErrHostAlreadyExists)
+				}
+				// add new HostInfo (same hostID, new IP)
+				s.startPoolFill(h)
+			}
 		}
 		delete(prevHosts, h.HostID())
 	}
 
-	// TODO(zariel): it may be worth having a mutex covering the overall ring state
-	// in a session so that everything sees a consistent state. Becuase as is today
-	// events can come in and due to ordering an UP host could be removed from the cluster
 	for _, host := range prevHosts {
-		r.session.removeHost(host)
+		s.metadataDescriber.removeTabletsWithHost(host)
+		s.removeHost(host)
 	}
+	s.policy.SetPartitioner(partitioner)
 
-	r.session.metadata.setPartitioner(partitioner)
-	r.session.policy.SetPartitioner(partitioner)
 	return nil
 }

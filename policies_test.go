@@ -2,6 +2,9 @@
 // Use of this source code is governed by a BSD-style
 // license that can be found in the LICENSE file.
 
+//go:build all || unit
+// +build all unit
+
 package gocql
 
 import (
@@ -24,6 +27,32 @@ func TestRoundRobbin(t *testing.T) {
 	hosts := [...]*HostInfo{
 		{hostId: "0", connectAddress: net.IPv4(0, 0, 0, 1)},
 		{hostId: "1", connectAddress: net.IPv4(0, 0, 0, 2)},
+	}
+
+	for _, host := range hosts {
+		policy.AddHost(host)
+	}
+
+	got := make(map[string]bool)
+	it := policy.Pick(nil)
+	for h := it(); h != nil; h = it() {
+		id := h.Info().hostId
+		if got[id] {
+			t.Fatalf("got duplicate host: %v", id)
+		}
+		got[id] = true
+	}
+	if len(got) != len(hosts) {
+		t.Fatalf("expected %d hosts got %d", len(hosts), len(got))
+	}
+}
+
+func TestRoundRobbinSameConnectAddress(t *testing.T) {
+	policy := RoundRobinHostPolicy()
+
+	hosts := [...]*HostInfo{
+		{hostId: "0", connectAddress: net.IPv4(0, 0, 0, 1), port: 9042},
+		{hostId: "1", connectAddress: net.IPv4(0, 0, 0, 1), port: 9043},
 	}
 
 	for _, host := range hosts {
@@ -132,7 +161,7 @@ func TestHostPolicy_TokenAware_LWT_DisablesHostShuffling(t *testing.T) {
 			{hostId: "3", connectAddress: net.IPv4(10, 0, 0, 4), tokens: []string{"25", "35", "45"}},
 			{hostId: "4", connectAddress: net.IPv4(10, 0, 0, 3), tokens: []string{"50", "60", "70"}},
 			{hostId: "5", connectAddress: net.IPv4(10, 0, 0, 4), tokens: []string{"50", "60", "70"}},
-		}, routingKey: "8", lwt: true, shuffle: true, want: []string{"0", "2", "3", "1"}},
+		}, routingKey: "8", lwt: true, shuffle: true, want: []string{"0", "2", "3", "4", "5", "1"}},
 		"token 08 shuffling not configured": {hosts: []*HostInfo{
 			{hostId: "0", connectAddress: net.IPv4(10, 0, 0, 1), tokens: []string{"00", "10", "20"}},
 			{hostId: "1", connectAddress: net.IPv4(10, 0, 0, 3), tokens: []string{"25", "35", "45"}},
@@ -140,7 +169,7 @@ func TestHostPolicy_TokenAware_LWT_DisablesHostShuffling(t *testing.T) {
 			{hostId: "3", connectAddress: net.IPv4(10, 0, 0, 4), tokens: []string{"25", "35", "45"}},
 			{hostId: "4", connectAddress: net.IPv4(10, 0, 0, 3), tokens: []string{"50", "60", "70"}},
 			{hostId: "5", connectAddress: net.IPv4(10, 0, 0, 4), tokens: []string{"50", "60", "70"}},
-		}, routingKey: "8", lwt: true, shuffle: false, want: []string{"0", "2", "3", "1"}},
+		}, routingKey: "8", lwt: true, shuffle: false, want: []string{"0", "2", "3", "4", "5", "1"}},
 		"token 30 shuffling configured": {hosts: []*HostInfo{
 			{hostId: "0", connectAddress: net.IPv4(10, 0, 0, 1), tokens: []string{"00", "10", "20"}},
 			{hostId: "1", connectAddress: net.IPv4(10, 0, 0, 3), tokens: []string{"25", "35", "45"}},
@@ -148,7 +177,7 @@ func TestHostPolicy_TokenAware_LWT_DisablesHostShuffling(t *testing.T) {
 			{hostId: "3", connectAddress: net.IPv4(10, 0, 0, 4), tokens: []string{"25", "35", "45"}},
 			{hostId: "4", connectAddress: net.IPv4(10, 0, 0, 3), tokens: []string{"50", "60", "70"}},
 			{hostId: "5", connectAddress: net.IPv4(10, 0, 0, 4), tokens: []string{"50", "60", "70"}},
-		}, routingKey: "30", lwt: true, shuffle: true, want: []string{"1", "3", "2", "0"}},
+		}, routingKey: "30", lwt: true, shuffle: true, want: []string{"1", "3", "2", "4", "5", "0"}},
 		"token 30 shuffling not configured": {hosts: []*HostInfo{
 			{hostId: "0", connectAddress: net.IPv4(10, 0, 0, 1), tokens: []string{"00", "10", "20"}},
 			{hostId: "1", connectAddress: net.IPv4(10, 0, 0, 3), tokens: []string{"25", "35", "45"}},
@@ -156,7 +185,7 @@ func TestHostPolicy_TokenAware_LWT_DisablesHostShuffling(t *testing.T) {
 			{hostId: "3", connectAddress: net.IPv4(10, 0, 0, 4), tokens: []string{"25", "35", "45"}},
 			{hostId: "4", connectAddress: net.IPv4(10, 0, 0, 3), tokens: []string{"50", "60", "70"}},
 			{hostId: "5", connectAddress: net.IPv4(10, 0, 0, 4), tokens: []string{"50", "60", "70"}},
-		}, routingKey: "30", lwt: true, shuffle: false, want: []string{"1", "3", "2", "0"}},
+		}, routingKey: "30", lwt: true, shuffle: false, want: []string{"1", "3", "2", "4", "5", "0"}},
 		"token 55 shuffling configured": {hosts: []*HostInfo{
 			{hostId: "0", connectAddress: net.IPv4(10, 0, 0, 1), tokens: []string{"00", "10", "20"}},
 			{hostId: "1", connectAddress: net.IPv4(10, 0, 0, 3), tokens: []string{"25", "35", "45"}},
@@ -164,7 +193,7 @@ func TestHostPolicy_TokenAware_LWT_DisablesHostShuffling(t *testing.T) {
 			{hostId: "3", connectAddress: net.IPv4(10, 0, 0, 4), tokens: []string{"25", "35", "45"}},
 			{hostId: "4", connectAddress: net.IPv4(10, 0, 0, 3), tokens: []string{"50", "60", "70"}},
 			{hostId: "5", connectAddress: net.IPv4(10, 0, 0, 4), tokens: []string{"50", "60", "70"}},
-		}, routingKey: "55", lwt: true, shuffle: true, want: []string{"0", "2", "3", "1"}},
+		}, routingKey: "55", lwt: true, shuffle: true, want: []string{"4", "5", "2", "3", "0", "1"}},
 		"token 55 shuffling not configured": {hosts: []*HostInfo{
 			{hostId: "0", connectAddress: net.IPv4(10, 0, 0, 1), tokens: []string{"00", "10", "20"}},
 			{hostId: "1", connectAddress: net.IPv4(10, 0, 0, 3), tokens: []string{"25", "35", "45"}},
@@ -172,7 +201,7 @@ func TestHostPolicy_TokenAware_LWT_DisablesHostShuffling(t *testing.T) {
 			{hostId: "3", connectAddress: net.IPv4(10, 0, 0, 4), tokens: []string{"25", "35", "45"}},
 			{hostId: "4", connectAddress: net.IPv4(10, 0, 0, 3), tokens: []string{"50", "60", "70"}},
 			{hostId: "5", connectAddress: net.IPv4(10, 0, 0, 4), tokens: []string{"50", "60", "70"}},
-		}, routingKey: "55", lwt: true, shuffle: false, want: []string{"0", "2", "3", "1"}},
+		}, routingKey: "55", lwt: true, shuffle: false, want: []string{"4", "5", "2", "3", "0", "1"}},
 	}
 	const keyspace = "myKeyspace"
 	for name, tc := range tests {
@@ -396,6 +425,14 @@ func TestSimpleRetryPolicy(t *testing.T) {
 	}
 }
 
+func TestLWTSimpleRetryPolicy(t *testing.T) {
+	ebrp := &SimpleRetryPolicy{NumRetries: 2}
+	// Verify that SimpleRetryPolicy implements both interfaces
+	var _ RetryPolicy = ebrp
+	var lwt_rt LWTRetryPolicy = ebrp
+	assertEqual(t, "retry type of LWT policy", lwt_rt.GetRetryTypeLWT(nil), Retry)
+}
+
 func TestExponentialBackoffPolicy(t *testing.T) {
 	// test with defaults
 	sut := &ExponentialBackoffRetryPolicy{NumRetries: 2}
@@ -422,6 +459,14 @@ func TestExponentialBackoffPolicy(t *testing.T) {
 			}
 		}
 	}
+}
+
+func TestLWTExponentialBackoffPolicy(t *testing.T) {
+	ebrp := &ExponentialBackoffRetryPolicy{NumRetries: 2}
+	// Verify that ExponentialBackoffRetryPolicy implements both interfaces
+	var _ RetryPolicy = ebrp
+	var lwt_rt LWTRetryPolicy = ebrp
+	assertEqual(t, "retry type of LWT policy", lwt_rt.GetRetryTypeLWT(nil), Retry)
 }
 
 func TestDowngradingConsistencyRetryPolicy(t *testing.T) {
@@ -573,6 +618,46 @@ func TestHostPolicy_DCAwareRR(t *testing.T) {
 		}
 	}
 
+}
+
+func TestHostPolicy_DCAwareRR_disableDCFailover(t *testing.T) {
+	p := DCAwareRoundRobinPolicy("local", HostPolicyOptionDisableDCFailover)
+
+	hosts := [...]*HostInfo{
+		{hostId: "0", connectAddress: net.ParseIP("10.0.0.1"), dataCenter: "local"},
+		{hostId: "1", connectAddress: net.ParseIP("10.0.0.2"), dataCenter: "local"},
+		{hostId: "2", connectAddress: net.ParseIP("10.0.0.3"), dataCenter: "remote"},
+		{hostId: "3", connectAddress: net.ParseIP("10.0.0.4"), dataCenter: "remote"},
+	}
+
+	for _, host := range hosts {
+		p.AddHost(host)
+	}
+
+	got := make(map[string]bool, len(hosts))
+	var dcs []string
+
+	it := p.Pick(nil)
+	for h := it(); h != nil; h = it() {
+		id := h.Info().hostId
+		dc := h.Info().dataCenter
+
+		if got[id] {
+			t.Fatalf("got duplicate host %s", id)
+		}
+		got[id] = true
+		dcs = append(dcs, dc)
+	}
+
+	if len(got) != 2 {
+		t.Fatalf("expected %d hosts got %d", 2, len(got))
+	}
+
+	for _, dc := range dcs {
+		if dc == "remote" {
+			t.Fatalf("got remote dc but failover was diabled")
+		}
+	}
 }
 
 // Tests of the token-aware host selection policy implementation with a
@@ -1008,4 +1093,102 @@ func TestHostPolicy_TokenAware_Issue1274(t *testing.T) {
 
 	time.Sleep(100 * time.Millisecond)
 	close(cancel)
+}
+
+func TestTokenAwarePolicyReset(t *testing.T) {
+	policy := TokenAwareHostPolicy(
+		RackAwareRoundRobinPolicy("local", "b"),
+		NonLocalReplicasFallback(),
+	)
+	policyInternal := policy.(*tokenAwareHostPolicy)
+
+	if policyInternal.fallback == nil {
+		t.Fatal("fallback is nil")
+	}
+	if !policyInternal.nonLocalReplicasFallback {
+		t.Fatal("nonLocalReplicasFallback is false")
+	}
+
+	policy.Init(&Session{logger: &defaultLogger{}})
+	if policyInternal.getKeyspaceMetadata == nil {
+		t.Fatal("keyspace metatadata fn is nil")
+	}
+	if policyInternal.getKeyspaceName == nil {
+		t.Fatal("keyspace name fn is nil")
+	}
+	if policyInternal.logger == nil {
+		t.Fatal("logger is nil")
+	}
+
+	// Reset - should reset fields that were set in Init
+	policy.Reset()
+
+	if policyInternal.fallback == nil { // we don't touch fallback
+		t.Fatal("fallback is nil")
+	}
+	if !policyInternal.nonLocalReplicasFallback { // we don't touch nonLocalReplicasFallback
+		t.Fatal("nonLocalReplicasFallback is false")
+	}
+	if policyInternal.getKeyspaceMetadata != nil {
+		t.Fatal("keyspace metatadata fn is not nil")
+	}
+	if policyInternal.getKeyspaceName != nil {
+		t.Fatal("keyspace name fn is not nil")
+	}
+	if policyInternal.logger != nil {
+		t.Fatal("logger is nil")
+	}
+}
+
+func TestTokenAwarePolicyResetInSessionClose(t *testing.T) {
+	policy := TokenAwareHostPolicy(
+		RackAwareRoundRobinPolicy("local", "b"),
+		NonLocalReplicasFallback(),
+	)
+	policyInternal := policy.(*tokenAwareHostPolicy)
+
+	if policyInternal.fallback == nil {
+		t.Fatal("fallback is nil")
+	}
+	if !policyInternal.nonLocalReplicasFallback {
+		t.Fatal("nonLocalReplicasFallback is false")
+	}
+
+	// emulate session initialization
+	session := &Session{
+		logger: &defaultLogger{},
+		policy: policy,
+	}
+	policy.Init(session)
+	// check that we are realy initialize policy
+	if policyInternal.getKeyspaceMetadata == nil {
+		t.Fatal("keyspace metatadata fn is nil")
+	}
+	if policyInternal.getKeyspaceName == nil {
+		t.Fatal("keyspace name fn is nil")
+	}
+	if policyInternal.logger == nil {
+		t.Fatal("logger is nil")
+	}
+
+	// session.Close should call policy.Reset method
+	session.Close()
+
+	// check that session.Close has called policy.Reset method
+
+	if policyInternal.fallback == nil { // we don't touch fallback in Reset
+		t.Fatal("fallback is nil")
+	}
+	if !policyInternal.nonLocalReplicasFallback { // we don't touch nonLocalReplicasFallback in Reset
+		t.Fatal("nonLocalReplicasFallback is false")
+	}
+	if policyInternal.getKeyspaceMetadata != nil {
+		t.Fatal("keyspace metatadata fn is not nil")
+	}
+	if policyInternal.getKeyspaceName != nil {
+		t.Fatal("keyspace name fn is not nil")
+	}
+	if policyInternal.logger != nil {
+		t.Fatal("logger is nil")
+	}
 }

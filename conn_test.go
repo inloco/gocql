@@ -25,6 +25,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/google/go-cmp/cmp"
+	"github.com/stretchr/testify/assert"
+
 	"github.com/gocql/gocql/internal/streams"
 )
 
@@ -34,14 +37,21 @@ const (
 
 func TestApprove(t *testing.T) {
 	tests := map[bool]bool{
-		approve("org.apache.cassandra.auth.PasswordAuthenticator", []string{}):                                          true,
-		approve("com.instaclustr.cassandra.auth.SharedSecretAuthenticator", []string{}):                                 true,
-		approve("com.datastax.bdp.cassandra.auth.DseAuthenticator", []string{}):                                         true,
-		approve("io.aiven.cassandra.auth.AivenAuthenticator", []string{}):                                               true,
-		approve("com.amazon.helenus.auth.HelenusAuthenticator", []string{}):                                             true,
-		approve("com.apache.cassandra.auth.FakeAuthenticator", []string{}):                                              false,
-		approve("com.apache.cassandra.auth.FakeAuthenticator", nil):                                                     false,
-		approve("com.apache.cassandra.auth.FakeAuthenticator", []string{"com.apache.cassandra.auth.FakeAuthenticator"}): true,
+		approve("org.apache.cassandra.auth.PasswordAuthenticator", []string{}):                                             true,
+		approve("org.apache.cassandra.auth.MutualTlsWithPasswordFallbackAuthenticator", []string{}):                        true,
+		approve("org.apache.cassandra.auth.MutualTlsAuthenticator", []string{}):                                            true,
+		approve("com.instaclustr.cassandra.auth.SharedSecretAuthenticator", []string{}):                                    true,
+		approve("com.datastax.bdp.cassandra.auth.DseAuthenticator", []string{}):                                            true,
+		approve("io.aiven.cassandra.auth.AivenAuthenticator", []string{}):                                                  true,
+		approve("com.amazon.helenus.auth.HelenusAuthenticator", []string{}):                                                true,
+		approve("com.ericsson.bss.cassandra.ecaudit.auth.AuditAuthenticator", []string{}):                                  true,
+		approve("com.scylladb.auth.SaslauthdAuthenticator", []string{}):                                                    true,
+		approve("com.scylladb.auth.TransitionalAuthenticator", []string{}):                                                 true,
+		approve("com.instaclustr.cassandra.auth.InstaclustrPasswordAuthenticator", []string{}):                             true,
+		approve("com.apache.cassandra.auth.FakeAuthenticator", []string{}):                                                 true,
+		approve("com.apache.cassandra.auth.FakeAuthenticator", nil):                                                        true,
+		approve("com.apache.cassandra.auth.FakeAuthenticator", []string{"com.apache.cassandra.auth.FakeAuthenticator"}):    true,
+		approve("com.apache.cassandra.auth.FakeAuthenticator", []string{"com.apache.cassandra.auth.NotFakeAuthenticator"}): false,
 	}
 	for k, v := range tests {
 		if k != v {
@@ -225,6 +235,7 @@ func TestStartupTimeout(t *testing.T) {
 	// Set very long query connection timeout
 	// so we know CreateSession() is using the ConnectTimeout
 	cluster.Timeout = time.Second * 5
+	cluster.ConnectTimeout = 600 * time.Millisecond
 
 	// Create session should timeout during connect attempt
 	_, err := cluster.CreateSession()
@@ -303,7 +314,7 @@ func TestCancel(t *testing.T) {
 	wg.Add(1)
 
 	go func() {
-		if err := qry.Exec(); err != context.Canceled {
+		if err := qry.Exec(); !errors.Is(err, context.Canceled) {
 			t.Fatalf("expected to get context cancel error: '%v', got '%v'", context.Canceled, err)
 		}
 		wg.Done()
@@ -448,6 +459,10 @@ func (t *testRetryPolicy) Attempt(qry RetryableQuery) bool {
 	return qry.Attempts() <= t.NumRetries
 }
 func (t *testRetryPolicy) GetRetryType(err error) RetryType {
+	var executedErr *QueryError
+	if errors.As(err, &executedErr) && executedErr.PotentiallyExecuted() && !executedErr.IsIdempotent() {
+		return Rethrow
+	}
 	return Retry
 }
 
@@ -565,7 +580,7 @@ func TestQueryTimeout(t *testing.T) {
 
 	select {
 	case err := <-ch:
-		if err != ErrTimeoutNoResponse {
+		if !errors.Is(err, ErrTimeoutNoResponse) {
 			t.Fatalf("expected to get %v for timeout got %v", ErrTimeoutNoResponse, err)
 		}
 	case <-time.After(40*time.Millisecond + db.cfg.Timeout):
@@ -659,8 +674,8 @@ func TestQueryTimeoutClose(t *testing.T) {
 		t.Fatal("timedout waiting to get a response once cluster is closed")
 	}
 
-	if err != ErrConnectionClosed {
-		t.Fatalf("expected to get %v got %v", ErrConnectionClosed, err)
+	if !errors.Is(err, ErrConnectionClosed) {
+		t.Fatalf("expected to get %v or an error wrapping it, got %v", ErrConnectionClosed, err)
 	}
 }
 
@@ -713,8 +728,86 @@ func TestContext_Timeout(t *testing.T) {
 	cancel()
 
 	err = db.Query("timeout").WithContext(ctx).Exec()
-	if err != context.Canceled {
+	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("expected to get context cancel error: %v got %v", context.Canceled, err)
+	}
+}
+
+type TestReconnectionPolicy struct {
+	NumRetries       int
+	GetIntervalCalls []int
+}
+
+func (c *TestReconnectionPolicy) GetInterval(currentRetry int) time.Duration {
+	c.GetIntervalCalls = append(c.GetIntervalCalls, currentRetry)
+	return time.Duration(0)
+}
+
+func (c *TestReconnectionPolicy) GetMaxRetries() int {
+	return c.NumRetries
+}
+
+func TestInitialRetryPolicy(t *testing.T) {
+	t.Parallel()
+
+	tcase := []struct {
+		NumRetries               int
+		ProtoVersion             int
+		ExpectedGetIntervalCalls []int
+		ExpectedErr              string
+	}{
+		{
+			NumRetries:               1,
+			ProtoVersion:             0,
+			ExpectedGetIntervalCalls: nil,
+			ExpectedErr:              "gocql: unable to create session: unable to connect to the cluster, last error: unable to discover protocol version:"},
+		{
+			NumRetries:               2,
+			ProtoVersion:             0,
+			ExpectedGetIntervalCalls: []int{1},
+			ExpectedErr:              "gocql: unable to create session: unable to connect to the cluster, last error: unable to discover protocol version:"},
+		{
+			NumRetries:               3,
+			ProtoVersion:             0,
+			ExpectedGetIntervalCalls: []int{1, 2},
+			ExpectedErr:              "gocql: unable to create session: unable to connect to the cluster, last error: unable to discover protocol version:"},
+		{
+			NumRetries:               1,
+			ProtoVersion:             4,
+			ExpectedGetIntervalCalls: nil,
+			ExpectedErr:              "gocql: unable to create session: unable to connect to the cluster, last error: unable to create control connection: unable to connect to initial hosts:"},
+		{
+			NumRetries:               2,
+			ProtoVersion:             4,
+			ExpectedGetIntervalCalls: []int{1},
+			ExpectedErr:              "gocql: unable to create session: unable to connect to the cluster, last error: unable to create control connection: unable to connect to initial hosts:"},
+		{
+			NumRetries:               3,
+			ProtoVersion:             4,
+			ExpectedGetIntervalCalls: []int{1, 2},
+			ExpectedErr:              "gocql: unable to create session: unable to connect to the cluster, last error: unable to create control connection: unable to connect to initial hosts:"},
+	}
+
+	for id := range tcase {
+		tc := tcase[id]
+		t.Run(fmt.Sprintf("NumRetries=%d_ProtocolVersion=%d", tc.NumRetries, tc.ProtoVersion), func(t *testing.T) {
+			t.Parallel()
+
+			cluster := NewCluster("127.254.254.254")
+			policy := &TestReconnectionPolicy{NumRetries: tc.NumRetries}
+			cluster.InitialReconnectionPolicy = policy
+			cluster.ProtoVersion = tc.ProtoVersion
+			_, err := cluster.CreateSession()
+			if err == nil {
+				t.Fatal("expected to get an error")
+			}
+			if !strings.Contains(err.Error(), tc.ExpectedErr) {
+				t.Errorf("expected error to contain %q got %q", tc.ExpectedErr, err.Error())
+			}
+			if !cmp.Equal(tc.ExpectedGetIntervalCalls, policy.GetIntervalCalls) {
+				t.Errorf("expected GetInterval calls to be (%+v) but was (%+v) instead", tc.ExpectedGetIntervalCalls, policy.GetIntervalCalls)
+			}
+		})
 	}
 }
 
@@ -752,7 +845,7 @@ func TestContext_CanceledBeforeExec(t *testing.T) {
 	cancel()
 
 	err = db.Query("timeout").WithContext(ctx).Exec()
-	if err != context.Canceled {
+	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("expected to get context cancel error: %v got %v", context.Canceled, err)
 	}
 
@@ -1309,4 +1402,89 @@ func (srv *TestServer) readFrame(conn net.Conn) (*framer, error) {
 	}
 
 	return framer, nil
+}
+
+func TestGetSchemaAgreement(t *testing.T) {
+	schema_version1 := ParseUUIDMust("af810386-a694-11ef-81fa-3aea73156247")
+	peersRows := []map[string]interface{}{
+		{
+			"data_center":     "datacenter1",
+			"host_id":         ParseUUIDMust("b2035fd9-e0ca-4857-8c45-e63c00fb7c43"),
+			"peer":            "127.0.0.3",
+			"preferred_ip":    "127.0.0.3",
+			"rack":            "rack1",
+			"release_version": "3.0.8",
+			"rpc_address":     "127.0.0.3",
+			"schema_version":  schema_version1,
+			"tokens":          []string{"-1296227678594315580994457470329811265"},
+		},
+		{
+			"data_center":     "datacenter1",
+			"host_id":         ParseUUIDMust("4b21ee4c-acea-4267-8e20-aaed5361a0dd"),
+			"peer":            "127.0.0.2",
+			"preferred_ip":    "127.0.0.2",
+			"rack":            "rack1",
+			"release_version": "3.0.8",
+			"rpc_address":     "127.0.0.2",
+			"schema_version":  schema_version1,
+			"tokens":          []string{"-1129762924682054333"},
+		},
+		{
+			"data_center":     "datacenter2",
+			"host_id":         ParseUUIDMust("dfef4a22-b8d8-47e9-aee5-8c19d4b7a9e3"),
+			"peer":            "127.0.0.5",
+			"preferred_ip":    "127.0.0.5",
+			"rack":            "rack1",
+			"release_version": "3.0.8",
+			"rpc_address":     "127.0.0.5",
+			"schema_version":  ParseUUIDMust("875a938a-a695-11ef-4314-85c8ef0ebaa2"),
+			"tokens":          []string{},
+		},
+	}
+
+	translateAddressPort := func(addr net.IP, port int) (net.IP, int) {
+		return addr, port
+	}
+
+	var logger StdLogger
+
+	t.Run("SchemaNotConsistent", func(t *testing.T) {
+		err := getSchemaAgreement(
+			[]string{"875a938a-a695-11ef-4314-85c8ef0ebaa2"},
+			peersRows,
+			net.ParseIP("127.0.0.1"),
+			9042,
+			translateAddressPort,
+			logger,
+		)
+
+		assert.Error(t, err, "error expected when local schema is different then others")
+	})
+
+	t.Run("ZeroTokenNodeSchemaNotConsistent", func(t *testing.T) {
+		err := getSchemaAgreement(
+			[]string{"af810386-a694-11ef-81fa-3aea73156247"},
+			peersRows,
+			net.ParseIP("127.0.0.1"),
+			9042,
+			translateAddressPort,
+			logger,
+		)
+
+		assert.Error(t, err, "expected error when zero-token node has different schema")
+	})
+
+	t.Run("SchemaConsistent", func(t *testing.T) {
+		peersRows[2]["schema_version"] = schema_version1
+		err := getSchemaAgreement(
+			[]string{"af810386-a694-11ef-81fa-3aea73156247"},
+			peersRows,
+			net.ParseIP("127.0.0.1"),
+			9042,
+			translateAddressPort,
+			logger,
+		)
+
+		assert.NoError(t, err, "expected no error when all nodes have the same schema")
+	})
 }

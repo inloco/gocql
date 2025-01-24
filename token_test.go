@@ -2,6 +2,9 @@
 // Use of this source code is governed by a BSD-style
 // license that can be found in the LICENSE file.
 
+//go:build all || unit
+// +build all unit
+
 package gocql
 
 import (
@@ -24,7 +27,7 @@ func TestMurmur3Partitioner(t *testing.T) {
 
 	// at least verify that the partitioner
 	// doesn't return nil
-	pk, _ := marshalInt(nil, 1)
+	pk, _ := marshalInt(1)
 	token = murmur3Partitioner{}.Hash(pk)
 	if token == nil {
 		t.Fatal("token was nil")
@@ -49,7 +52,7 @@ func TestOrderedPartitioner(t *testing.T) {
 	// at least verify that the partitioner
 	// doesn't return nil
 	p := orderedPartitioner{}
-	pk, _ := marshalInt(nil, 1)
+	pk, _ := marshalInt(1)
 	token := p.Hash(pk)
 	if token == nil {
 		t.Fatal("token was nil")
@@ -85,7 +88,7 @@ func TestRandomPartitioner(t *testing.T) {
 	// at least verify that the partitioner
 	// doesn't return nil
 	p := randomPartitioner{}
-	pk, _ := marshalInt(nil, 1)
+	pk, _ := marshalInt(1)
 	token := p.Hash(pk)
 	if token == nil {
 		t.Fatal("token was nil")
@@ -133,7 +136,7 @@ func TestRandomToken(t *testing.T) {
 type intToken int
 
 func (i intToken) String() string        { return strconv.Itoa(int(i)) }
-func (i intToken) Less(token token) bool { return i < token.(intToken) }
+func (i intToken) Less(token Token) bool { return i < token.(intToken) }
 
 // Test of the token ring implementation based on example at the start of this
 // page of documentation:

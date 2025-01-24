@@ -42,11 +42,11 @@ func TestSessionAPI(t *testing.T) {
 		t.Fatalf("expceted prefetch 0.75, got %v", s.prefetch)
 	}
 
-	trace := &traceWriter{}
+	trace := NewTracer(nil)
 
 	s.SetTrace(trace)
 	if s.trace != trace {
-		t.Fatalf("expected traceWriter '%v',got '%v'", trace, s.trace)
+		t.Fatalf("expected tracer '%v',got '%v'", trace, s.trace)
 	}
 
 	qry := s.Query("test", 1)
@@ -68,16 +68,16 @@ func TestSessionAPI(t *testing.T) {
 	}
 
 	itr := s.executeQuery(qry)
-	if itr.err != ErrNoConnections {
-		t.Fatalf("expected itr.err to be '%v', got '%v'", ErrNoConnections, itr.err)
+	if itr.err != ErrSessionNotReady {
+		t.Fatalf("expected itr.err to be '%v', got '%v'", ErrSessionNotReady, itr.err)
 	}
 
-	testBatch := s.NewBatch(LoggedBatch)
+	testBatch := s.Batch(LoggedBatch)
 	testBatch.Query("test")
 	err := s.ExecuteBatch(testBatch)
 
-	if err != ErrNoConnections {
-		t.Fatalf("expected session.ExecuteBatch to return '%v', got '%v'", ErrNoConnections, err)
+	if err != ErrSessionNotReady {
+		t.Fatalf("expected session.ExecuteBatch to return '%v', got '%v'", ErrSessionNotReady, err)
 	}
 
 	s.Close()
@@ -138,7 +138,7 @@ func TestQueryBasicAPI(t *testing.T) {
 		t.Fatalf("expected Query.GetConsistency to return 'LocalSerial', got '%s'", qry.GetConsistency())
 	}
 
-	trace := &traceWriter{}
+	trace := NewTracer(nil)
 	qry.Trace(trace)
 	if qry.trace != trace {
 		t.Fatalf("expected Query.Trace to be '%v', got '%v'", trace, qry.trace)
@@ -205,7 +205,7 @@ func TestBatchBasicAPI(t *testing.T) {
 	s.pool = cfg.PoolConfig.buildPool(s)
 
 	// Test UnloggedBatch
-	b := s.NewBatch(UnloggedBatch)
+	b := s.Batch(UnloggedBatch)
 	if b.Type != UnloggedBatch {
 		t.Fatalf("expceted batch.Type to be '%v', got '%v'", UnloggedBatch, b.Type)
 	} else if b.rt != cfg.RetryPolicy {
@@ -213,7 +213,7 @@ func TestBatchBasicAPI(t *testing.T) {
 	}
 
 	// Test LoggedBatch
-	b = s.NewBatch(LoggedBatch)
+	b = s.Batch(LoggedBatch)
 	if b.Type != LoggedBatch {
 		t.Fatalf("expected batch.Type to be '%v', got '%v'", LoggedBatch, b.Type)
 	}
@@ -247,7 +247,7 @@ func TestBatchBasicAPI(t *testing.T) {
 		t.Fatalf("expected batch.GetConsistency() to return 'One', got '%s'", b.GetConsistency())
 	}
 
-	trace := &traceWriter{}
+	trace := NewTracer(nil)
 	b.Trace(trace)
 	if b.trace != trace {
 		t.Fatalf("expected batch.Trace to be '%v', got '%v'", trace, b.trace)
