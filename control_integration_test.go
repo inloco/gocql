@@ -1,5 +1,5 @@
-//go:build integration && scylla
-// +build integration,scylla
+//go:build integration
+// +build integration
 
 package gocql
 
@@ -21,7 +21,7 @@ func (d unixSocketDialer) DialContext(_ context.Context, _, _ string) (net.Conn,
 }
 
 func TestUnixSockets(t *testing.T) {
-	socketPath := "/tmp/scylla/cql.m"
+	socketPath := "/tmp/scylla_node_1/cql.m"
 
 	c := createCluster()
 	c.NumConns = 1

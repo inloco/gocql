@@ -1,5 +1,29 @@
-//go:build all || cassandra || scylla
-// +build all cassandra scylla
+//go:build integration
+// +build integration
+
+/*
+ * Licensed to the Apache Software Foundation (ASF) under one
+ * or more contributor license agreements.  See the NOTICE file
+ * distributed with this work for additional information
+ * regarding copyright ownership.  The ASF licenses this file
+ * to you under the Apache License, Version 2.0 (the
+ * "License"); you may not use this file except in compliance
+ * with the License.  You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+/*
+ * Content before git sha 34fdeebefcbf183ed7f916f931aa0586fdaa1b40
+ * Copyright (c) 2016, The Gocql authors,
+ * provided under the BSD-3-Clause License.
+ * See the NOTICE file distributed with this work for additional information.
+ */
 
 package gocql
 
@@ -497,14 +521,14 @@ func TestPagingWithBind(t *testing.T) {
 func TestCAS(t *testing.T) {
 	cluster := createCluster()
 	cluster.SerialConsistency = LocalSerial
-	session := createSessionFromCluster(cluster, t)
+	session := createSessionFromClusterTabletsDisabled(cluster, t)
 	defer session.Close()
 
 	if session.cfg.ProtoVersion == 1 {
 		t.Skip("lightweight transactions not supported. Please use Cassandra >= 2.0")
 	}
 
-	if err := createTable(session, `CREATE TABLE gocql_test.cas_table (
+	if err := createTable(session, `CREATE TABLE cas_table (
 			title         varchar,
 			revid   	  timeuuid,
 			last_modified timestamp,
@@ -669,14 +693,14 @@ func TestDurationType(t *testing.T) {
 }
 
 func TestMapScanCAS(t *testing.T) {
-	session := createSession(t)
+	session := createSessionFromClusterTabletsDisabled(createCluster(), t)
 	defer session.Close()
 
 	if session.cfg.ProtoVersion == 1 {
 		t.Skip("lightweight transactions not supported. Please use Cassandra >= 2.0")
 	}
 
-	if err := createTable(session, `CREATE TABLE gocql_test.cas_table2 (
+	if err := createTable(session, `CREATE TABLE cas_table2 (
 			title         varchar,
 			revid   	  timeuuid,
 			last_modified timestamp,
@@ -1240,14 +1264,14 @@ func TestScanWithNilArguments(t *testing.T) {
 }
 
 func TestScanCASWithNilArguments(t *testing.T) {
-	session := createSession(t)
+	session := createSessionFromClusterTabletsDisabled(createCluster(), t)
 	defer session.Close()
 
 	if session.cfg.ProtoVersion == 1 {
 		t.Skip("lightweight transactions not supported. Please use Cassandra >= 2.0")
 	}
 
-	if err := createTable(session, `CREATE TABLE gocql_test.scan_cas_with_nil_arguments (
+	if err := createTable(session, `CREATE TABLE scan_cas_with_nil_arguments (
 		foo   varchar,
 		bar   varchar,
 		PRIMARY KEY (foo, bar)
@@ -1709,7 +1733,7 @@ func TestPrepare_PreparedCacheKey(t *testing.T) {
 
 	// create a second keyspace
 	cluster2 := createCluster()
-	createKeyspace(t, cluster2, "gocql_test2")
+	createKeyspace(t, cluster2, "gocql_test2", false)
 	cluster2.Keyspace = "gocql_test2"
 	session2, err := cluster2.CreateSession()
 	if err != nil {

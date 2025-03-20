@@ -1,3 +1,27 @@
+/*
+ * Licensed to the Apache Software Foundation (ASF) under one
+ * or more contributor license agreements.  See the NOTICE file
+ * distributed with this work for additional information
+ * regarding copyright ownership.  The ASF licenses this file
+ * to you under the Apache License, Version 2.0 (the
+ * "License"); you may not use this file except in compliance
+ * with the License.  You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+/*
+ * Content before git sha 34fdeebefcbf183ed7f916f931aa0586fdaa1b40
+ * Copyright (c) 2016, The Gocql authors,
+ * provided under the BSD-3-Clause License.
+ * See the NOTICE file distributed with this work for additional information.
+ */
+
 package gocql
 
 import (
@@ -13,18 +37,17 @@ import (
 )
 
 var (
-	flagCluster          = flag.String("cluster", "127.0.0.1", "a comma-separated list of host:port tuples")
-	flagMultiNodeCluster = flag.String("multiCluster", "127.0.0.2", "a comma-separated list of host:port tuples")
-	flagProto            = flag.Int("proto", 0, "protcol version")
-	flagCQL              = flag.String("cql", "3.0.0", "CQL version")
-	flagRF               = flag.Int("rf", 1, "replication factor for test keyspace")
-	clusterSize          = flag.Int("clusterSize", 1, "the expected size of the cluster")
-	flagRetry            = flag.Int("retries", 5, "number of times to retry queries")
-	flagAutoWait         = flag.Duration("autowait", 1000*time.Millisecond, "time to wait for autodiscovery to fill the hosts poll")
-	flagRunSslTest       = flag.Bool("runssl", false, "Set to true to run ssl test")
-	flagRunAuthTest      = flag.Bool("runauth", false, "Set to true to run authentication test")
-	flagCompressTest     = flag.String("compressor", "", "compressor to use")
-	flagTimeout          = flag.Duration("gocql.timeout", 5*time.Second, "sets the connection `timeout` for all operations")
+	flagCluster      = flag.String("cluster", "127.0.0.1", "a comma-separated list of host:port tuples")
+	flagProto        = flag.Int("proto", 0, "protcol version")
+	flagCQL          = flag.String("cql", "3.0.0", "CQL version")
+	flagRF           = flag.Int("rf", 1, "replication factor for test keyspace")
+	clusterSize      = flag.Int("clusterSize", 1, "the expected size of the cluster")
+	flagRetry        = flag.Int("retries", 5, "number of times to retry queries")
+	flagAutoWait     = flag.Duration("autowait", 1000*time.Millisecond, "time to wait for autodiscovery to fill the hosts poll")
+	flagRunSslTest   = flag.Bool("runssl", false, "Set to true to run ssl test")
+	flagRunAuthTest  = flag.Bool("runauth", false, "Set to true to run authentication test")
+	flagCompressTest = flag.String("compressor", "", "compressor to use")
+	flagTimeout      = flag.Duration("gocql.timeout", 5*time.Second, "sets the connection `timeout` for all operations")
 
 	flagCassVersion cassVersion
 )
@@ -37,10 +60,6 @@ func init() {
 
 func getClusterHosts() []string {
 	return strings.Split(*flagCluster, ",")
-}
-
-func getMultiNodeClusterHosts() []string {
-	return strings.Split(*flagMultiNodeCluster, ",")
 }
 
 func addSslOptions(cluster *ClusterConfig) *ClusterConfig {
@@ -56,7 +75,29 @@ func addSslOptions(cluster *ClusterConfig) *ClusterConfig {
 	return cluster
 }
 
-var initOnce sync.Once
+type OnceManager struct {
+	mu        sync.Mutex
+	keyspaces map[string]*sync.Once
+}
+
+func NewOnceManager() *OnceManager {
+	return &OnceManager{
+		keyspaces: make(map[string]*sync.Once),
+	}
+}
+
+func (o *OnceManager) GetOnce(key string) *sync.Once {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+
+	if once, exists := o.keyspaces[key]; exists {
+		return once
+	}
+	o.keyspaces[key] = &sync.Once{}
+	return o.keyspaces[key]
+}
+
+var initKeyspaceOnce = NewOnceManager()
 
 func createTable(s *Session, table string) error {
 	// lets just be really sure
@@ -107,36 +148,7 @@ func createCluster(opts ...func(*ClusterConfig)) *ClusterConfig {
 	return cluster
 }
 
-func createMultiNodeCluster(opts ...func(*ClusterConfig)) *ClusterConfig {
-	clusterHosts := getMultiNodeClusterHosts()
-	cluster := NewCluster(clusterHosts...)
-	cluster.ProtoVersion = *flagProto
-	cluster.CQLVersion = *flagCQL
-	cluster.Timeout = *flagTimeout
-	cluster.Consistency = Quorum
-	cluster.MaxWaitSchemaAgreement = 2 * time.Minute // travis might be slow
-	if *flagRetry > 0 {
-		cluster.RetryPolicy = &SimpleRetryPolicy{NumRetries: *flagRetry}
-	}
-
-	switch *flagCompressTest {
-	case "snappy":
-		cluster.Compressor = &SnappyCompressor{}
-	case "":
-	default:
-		panic("invalid compressor: " + *flagCompressTest)
-	}
-
-	cluster = addSslOptions(cluster)
-
-	for _, opt := range opts {
-		opt(cluster)
-	}
-
-	return cluster
-}
-
-func createKeyspace(tb testing.TB, cluster *ClusterConfig, keyspace string) {
+func createKeyspace(tb testing.TB, cluster *ClusterConfig, keyspace string, disableTablets bool) {
 	// TODO: tb.Helper()
 	c := *cluster
 	c.Keyspace = "system"
@@ -152,25 +164,44 @@ func createKeyspace(tb testing.TB, cluster *ClusterConfig, keyspace string) {
 		panic(fmt.Sprintf("unable to drop keyspace: %v", err))
 	}
 
-	err = createTable(session, fmt.Sprintf(`CREATE KEYSPACE %s
+	query := fmt.Sprintf(`CREATE KEYSPACE %s
 	WITH replication = {
 		'class' : 'NetworkTopologyStrategy',
 		'replication_factor' : %d
-	}`, keyspace, *flagRF))
+	}`, keyspace, *flagRF)
+
+	if disableTablets {
+		query += " AND tablets = {'enabled': false}"
+	} else {
+		query += " AND tablets = {'enabled': true, 'initial': 8};"
+	}
+
+	err = createTable(session, query)
 
 	if err != nil {
 		panic(fmt.Sprintf("unable to create keyspace: %v", err))
 	}
 }
 
-func createSessionFromCluster(cluster *ClusterConfig, tb testing.TB) *Session {
+type testKeyspaceOpts struct {
+	tabletsDisabled bool
+}
+
+func (o *testKeyspaceOpts) KeyspaceName() string {
+	if o.tabletsDisabled {
+		return "gocql_test_tablets_disabled"
+	}
+	return "gocql_test"
+}
+
+func createSessionFromClusterHelper(cluster *ClusterConfig, tb testing.TB, opts testKeyspaceOpts) *Session {
 	// Drop and re-create the keyspace once. Different tests should use their own
 	// individual tables, but can assume that the table does not exist before.
-	initOnce.Do(func() {
-		createKeyspace(tb, cluster, "gocql_test")
+	initKeyspaceOnce.GetOnce(opts.KeyspaceName()).Do(func() {
+		createKeyspace(tb, cluster, opts.KeyspaceName(), opts.tabletsDisabled)
 	})
 
-	cluster.Keyspace = "gocql_test"
+	cluster.Keyspace = opts.KeyspaceName()
 	session, err := cluster.CreateSession()
 	if err != nil {
 		tb.Fatal("createSession:", err)
@@ -183,36 +214,12 @@ func createSessionFromCluster(cluster *ClusterConfig, tb testing.TB) *Session {
 	return session
 }
 
-func createSessionFromMultiNodeCluster(cluster *ClusterConfig, tb testing.TB) *Session {
-	keyspace := "test1"
+func createSessionFromClusterTabletsDisabled(cluster *ClusterConfig, tb testing.TB) *Session {
+	return createSessionFromClusterHelper(cluster, tb, testKeyspaceOpts{tabletsDisabled: true})
+}
 
-	session, err := cluster.CreateSession()
-	if err != nil {
-		tb.Fatal("createSession:", err)
-	}
-
-	initOnce.Do(func() {
-		if err = createTable(session, `DROP KEYSPACE IF EXISTS `+keyspace); err != nil {
-			panic(fmt.Sprintf("unable to drop keyspace: %v", err))
-		}
-
-		if err = createTable(session, fmt.Sprintf(`CREATE KEYSPACE %s
-		WITH replication = {
-			'class': 'NetworkTopologyStrategy',
-			'replication_factor': 1
-		} AND tablets = {
-			'initial': 8
-		};`, keyspace)); err != nil {
-			panic(fmt.Sprintf("unable to create keyspace: %v", err))
-		}
-
-	})
-
-	if err := session.control.awaitSchemaAgreement(); err != nil {
-		tb.Fatal(err)
-	}
-
-	return session
+func createSessionFromCluster(cluster *ClusterConfig, tb testing.TB) *Session {
+	return createSessionFromClusterHelper(cluster, tb, testKeyspaceOpts{tabletsDisabled: false})
 }
 
 func createSession(tb testing.TB, opts ...func(config *ClusterConfig)) *Session {

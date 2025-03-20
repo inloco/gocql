@@ -1,6 +1,26 @@
-// Copyright (c) 2012 The gocql Authors. All rights reserved.
-// Use of this source code is governed by a BSD-style
-// license that can be found in the LICENSE file.
+/*
+ * Licensed to the Apache Software Foundation (ASF) under one
+ * or more contributor license agreements.  See the NOTICE file
+ * distributed with this work for additional information
+ * regarding copyright ownership.  The ASF licenses this file
+ * to you under the Apache License, Version 2.0 (the
+ * "License"); you may not use this file except in compliance
+ * with the License.  You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+/*
+ * Content before git sha 34fdeebefcbf183ed7f916f931aa0586fdaa1b40
+ * Copyright (c) 2012, The Gocql authors,
+ * provided under the BSD-3-Clause License.
+ * See the NOTICE file distributed with this work for additional information.
+ */
 
 package gocql
 
@@ -8,7 +28,6 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
-	"github.com/gocql/gocql/serialization/boolean"
 	"math"
 	"reflect"
 	"strings"
@@ -17,6 +36,7 @@ import (
 	"github.com/gocql/gocql/serialization/ascii"
 	"github.com/gocql/gocql/serialization/bigint"
 	"github.com/gocql/gocql/serialization/blob"
+	"github.com/gocql/gocql/serialization/boolean"
 	"github.com/gocql/gocql/serialization/counter"
 	"github.com/gocql/gocql/serialization/cqlint"
 	"github.com/gocql/gocql/serialization/cqltime"
@@ -60,6 +80,12 @@ type Marshaler interface {
 	MarshalCQL(info TypeInfo) ([]byte, error)
 }
 
+type DirectMarshal []byte
+
+func (m DirectMarshal) MarshalCQL(_ TypeInfo) ([]byte, error) {
+	return m, nil
+}
+
 // Unmarshaler is an interface for custom unmarshaler.
 // Each value of the 'CQL binary protocol' consist of <value_len> and <value_data>.
 // <value_len> can be 'unset'(-2), 'nil'(-1), 'zero'(0) or any value up to 2147483647.
@@ -73,6 +99,13 @@ type Marshaler interface {
 // CQL binary protocol info:https://github.com/apache/cassandra/tree/trunk/doc
 type Unmarshaler interface {
 	UnmarshalCQL(info TypeInfo, data []byte) error
+}
+
+type DirectUnmarshal []byte
+
+func (d *DirectUnmarshal) UnmarshalCQL(_ TypeInfo, data []byte) error {
+	*d = bytes.Clone(data)
+	return nil
 }
 
 // Marshal returns the CQL encoding of the value for the Cassandra
