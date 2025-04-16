@@ -22,7 +22,7 @@ require (
 	github.com/hailocab/go-hostpool v0.0.0-20160125115350-e80d13ce29ed
 	github.com/klauspost/compress v1.17.9
 	github.com/stretchr/testify v1.9.0
-	golang.org/x/net v0.36.0
+	golang.org/x/net v0.38.0
 	gopkg.in/inf.v0 v0.9.1
 	sigs.k8s.io/yaml v1.3.0
 )
