@@ -435,12 +435,6 @@ func (s *Session) init() error {
 		return ErrNoConnectionsStarted
 	}
 
-	// Invoke KeyspaceChanged to let the policy cache the session keyspace
-	// parameters. This is used by tokenAwareHostPolicy to discover replicas.
-	if !s.cfg.disableControlConn && s.cfg.Keyspace != "" {
-		s.policy.KeyspaceChanged(KeyspaceUpdateEvent{Keyspace: s.cfg.Keyspace})
-	}
-
 	if err = s.policy.IsOperational(s); err != nil {
 		return fmt.Errorf("gocql: unable to create session: %v", err)
 	}
@@ -448,6 +442,12 @@ func (s *Session) init() error {
 	s.sessionStateMu.Lock()
 	s.isInitialized = true
 	s.sessionStateMu.Unlock()
+
+	// Invoke KeyspaceChanged to let the policy cache the session keyspace
+	// parameters. This is used by tokenAwareHostPolicy to discover replicas.
+	if !s.cfg.disableControlConn && s.cfg.Keyspace != "" {
+		s.policy.KeyspaceChanged(KeyspaceUpdateEvent{Keyspace: s.cfg.Keyspace})
+	}
 
 	return nil
 }
