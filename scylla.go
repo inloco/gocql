@@ -673,7 +673,7 @@ func (sd *scyllaDialer) DialHost(ctx context.Context, host *HostInfo) (*DialedHo
 	if err != nil {
 		return nil, err
 	}
-	addr := host.HostnameAndPort()
+	addr := net.JoinHostPort(ip.String(), strconv.Itoa(port))
 	return WrapTLS(ctx, conn, addr, sd.tlsConfig)
 }
 
