@@ -32,6 +32,7 @@ import (
 	"fmt"
 	"io/ioutil"
 	"net"
+	"os"
 	"sync/atomic"
 	"time"
 )
@@ -173,7 +174,7 @@ type ClusterConfig struct {
 
 	// Consistency for the serial part of queries, values can be either SERIAL or LOCAL_SERIAL.
 	// Default: unset
-	SerialConsistency SerialConsistency
+	SerialConsistency Consistency
 
 	// SslOpts configures TLS use when HostDialer is not set.
 	// SslOpts is ignored if HostDialer is set.
@@ -224,7 +225,7 @@ type ClusterConfig struct {
 	// If DisableInitialHostLookup then the driver will not attempt to get host info
 	// from the system.peers table, this will mean that the driver will connect to
 	// hosts supplied and will not attempt to lookup the hosts information, this will
-	// mean that data_centre, rack and token information will not be available and as
+	// mean that data_center, rack and token information will not be available and as
 	// such host filtering and token aware query routing will not be available.
 	DisableInitialHostLookup bool
 
@@ -302,7 +303,7 @@ type ClusterConfig struct {
 	DisableShardAwarePort bool
 
 	// Logger for this ClusterConfig.
-	// If not specified, defaults to the global gocql.Logger.
+	// If not specified, defaults to the gocql.defaultLogger.
 	Logger StdLogger
 
 	// The timeout for the requests to the schema tables. (default: 60s)
@@ -311,7 +312,77 @@ type ClusterConfig struct {
 	// internal config for testing
 	disableControlConn bool
 	disableInit        bool
+
+	DNSResolver DNSResolver
+
+	ApplicationInfo ApplicationInfo
 }
+
+type DNSResolver interface {
+	LookupIP(host string) ([]net.IP, error)
+}
+
+type ApplicationInfo interface {
+	UpdateStartupOptions(map[string]string)
+}
+
+type StaticApplicationInfo struct {
+	applicationName    string
+	applicationVersion string
+	clientID           string
+}
+
+func NewStaticApplicationInfo(name, version, clientID string) *StaticApplicationInfo {
+	return &StaticApplicationInfo{
+		applicationName:    name,
+		applicationVersion: version,
+		clientID:           clientID,
+	}
+}
+
+func (i *StaticApplicationInfo) UpdateStartupOptions(opts map[string]string) {
+	if i.applicationName != "" {
+		opts["APPLICATION_NAME"] = i.applicationName
+	}
+	if i.applicationVersion != "" {
+		opts["APPLICATION_VERSION"] = i.applicationVersion
+	}
+	if i.clientID != "" {
+		opts["CLIENT_ID"] = i.clientID
+	}
+}
+
+type SimpleDNSResolver struct {
+	hostLookupPreferV4 bool
+}
+
+func NewSimpleDNSResolver(hostLookupPreferV4 bool) *SimpleDNSResolver {
+	return &SimpleDNSResolver{
+		hostLookupPreferV4,
+	}
+}
+
+func (r SimpleDNSResolver) LookupIP(host string) ([]net.IP, error) {
+	ips, err := net.LookupIP(host)
+	if err != nil {
+		return nil, err
+	}
+	// Filter to v4 addresses if any present
+	if r.hostLookupPreferV4 {
+		var preferredIPs []net.IP
+		for _, v := range ips {
+			if v4 := v.To4(); v4 != nil {
+				preferredIPs = append(preferredIPs, v4)
+			}
+		}
+		if len(preferredIPs) != 0 {
+			ips = preferredIPs
+		}
+	}
+	return ips, nil
+}
+
+var defaultDnsResolver = NewSimpleDNSResolver(os.Getenv("GOCQL_HOST_LOOKUP_PREFER_V4") == "true")
 
 type Dialer interface {
 	DialContext(ctx context.Context, network, addr string) (net.Conn, error)
@@ -351,6 +422,8 @@ func NewCluster(hosts ...string) *ClusterConfig {
 		MetadataSchemaRequestTimeout: 60 * time.Second,
 		DisableSkipMetadata:          true,
 		WarningsHandlerBuilder:       DefaultWarningHandlerBuilder,
+		Logger:                       &defaultLogger{},
+		DNSResolver:                  defaultDnsResolver,
 	}
 
 	return cfg
@@ -358,7 +431,7 @@ func NewCluster(hosts ...string) *ClusterConfig {
 
 func (cfg *ClusterConfig) logger() StdLogger {
 	if cfg.Logger == nil {
-		return Logger
+		return &defaultLogger{}
 	}
 	return cfg.Logger
 }
@@ -499,7 +572,15 @@ func (cfg *ClusterConfig) Validate() error {
 	}
 
 	if !cfg.DisableSkipMetadata {
-		Logger.Println("warning: enabling skipping metadata can lead to unpredictible results when executing query and altering columns involved in the query.")
+		cfg.Logger.Println("warning: enabling skipping metadata can lead to unpredictible results when executing query and altering columns involved in the query.")
+	}
+
+	if cfg.SerialConsistency > 0 && !cfg.SerialConsistency.IsSerial() {
+		return fmt.Errorf("the default SerialConsistency level is not allowed to be anything else but SERIAL or LOCAL_SERIAL. Recived value: %v", cfg.SerialConsistency)
+	}
+
+	if cfg.DNSResolver == nil {
+		return fmt.Errorf("DNSResolver is empty")
 	}
 
 	return cfg.ValidateAndInitSSL()

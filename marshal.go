@@ -30,7 +30,6 @@ import (
 	"fmt"
 	"math"
 	"reflect"
-	"strings"
 	"unsafe"
 
 	"github.com/gocql/gocql/serialization/ascii"
@@ -123,7 +122,7 @@ func (d *DirectUnmarshal) UnmarshalCQL(_ TypeInfo, data []byte) error {
 //	tinyint, smallint, int      | integer types      |
 //	tinyint, smallint, int      | string             | formatted as base 10 number
 //	bigint, counter             | integer types      |
-//	bigint, counter             | big.Int            |
+//	bigint, counter             | big.Int            | value limited as int64
 //	bigint, counter             | string             | formatted as base 10 number
 //	float                       | float32            |
 //	double                      | float64            |
@@ -156,6 +155,9 @@ func (d *DirectUnmarshal) UnmarshalCQL(_ TypeInfo, data []byte) error {
 //	duration                    | time.Duration      |
 //	duration                    | gocql.Duration     |
 //	duration                    | string             | parsed with time.ParseDuration
+//
+// The marshal/unmarshal error provides a list of supported types when an unsupported type is attempted.
+
 func Marshal(info TypeInfo, value interface{}) ([]byte, error) {
 	if info.Version() < protoVersion1 {
 		panic("protocol version not set")
@@ -226,11 +228,6 @@ func Marshal(info TypeInfo, value interface{}) ([]byte, error) {
 		return marshalDate(value)
 	case TypeDuration:
 		return marshalDuration(value)
-	}
-
-	// detect protocol 2 UDT
-	if strings.HasPrefix(info.Custom(), "org.apache.cassandra.db.marshal.UserType") && info.Version() < 3 {
-		return nil, ErrorUDTUnavailable
 	}
 
 	// TODO(tux21b): add the remaining types
@@ -338,11 +335,6 @@ func Unmarshal(info TypeInfo, data []byte, value interface{}) error {
 		return unmarshalDate(data, value)
 	case TypeDuration:
 		return unmarshalDuration(data, value)
-	}
-
-	// detect protocol 2 UDT
-	if strings.HasPrefix(info.Custom(), "org.apache.cassandra.db.marshal.UserType") && info.Version() < 3 {
-		return ErrorUDTUnavailable
 	}
 
 	// TODO(tux21b): add the remaining types
@@ -682,23 +674,14 @@ func unmarshalDuration(data []byte, value interface{}) error {
 }
 
 func writeCollectionSize(info CollectionType, n int, buf *bytes.Buffer) error {
-	if info.proto > protoVersion2 {
-		if n > math.MaxInt32 {
-			return marshalErrorf("marshal: collection too large")
-		}
-
-		buf.WriteByte(byte(n >> 24))
-		buf.WriteByte(byte(n >> 16))
-		buf.WriteByte(byte(n >> 8))
-		buf.WriteByte(byte(n))
-	} else {
-		if n > math.MaxUint16 {
-			return marshalErrorf("marshal: collection too large")
-		}
-
-		buf.WriteByte(byte(n >> 8))
-		buf.WriteByte(byte(n))
+	if n > math.MaxInt32 {
+		return marshalErrorf("marshal: collection too large")
 	}
+
+	buf.WriteByte(byte(n >> 24))
+	buf.WriteByte(byte(n >> 16))
+	buf.WriteByte(byte(n >> 8))
+	buf.WriteByte(byte(n))
 
 	return nil
 }
@@ -738,7 +721,7 @@ func marshalList(info TypeInfo, value interface{}) ([]byte, error) {
 			}
 			itemLen := len(item)
 			// Set the value to null for supported protocols
-			if item == nil && listInfo.proto > protoVersion2 {
+			if item == nil {
 				itemLen = -1
 			}
 			if err := writeCollectionSize(listInfo, itemLen, buf); err != nil {
@@ -762,19 +745,11 @@ func marshalList(info TypeInfo, value interface{}) ([]byte, error) {
 }
 
 func readCollectionSize(info CollectionType, data []byte) (size, read int, err error) {
-	if info.proto > protoVersion2 {
-		if len(data) < 4 {
-			return 0, 0, unmarshalErrorf("unmarshal list: unexpected eof")
-		}
-		size = int(int32(data[0])<<24 | int32(data[1])<<16 | int32(data[2])<<8 | int32(data[3]))
-		read = 4
-	} else {
-		if len(data) < 2 {
-			return 0, 0, unmarshalErrorf("unmarshal list: unexpected eof")
-		}
-		size = int(data[0])<<8 | int(data[1])
-		read = 2
+	if len(data) < 4 {
+		return 0, 0, unmarshalErrorf("unmarshal list: unexpected eof")
 	}
+	size = int(int32(data[0])<<24 | int32(data[1])<<16 | int32(data[2])<<8 | int32(data[3]))
+	read = 4
 	return
 }
 
@@ -878,7 +853,7 @@ func marshalMap(info TypeInfo, value interface{}) ([]byte, error) {
 		}
 		itemLen := len(item)
 		// Set the key to null for supported protocols
-		if item == nil && mapInfo.proto > protoVersion2 {
+		if item == nil {
 			itemLen = -1
 		}
 		if err := writeCollectionSize(mapInfo, itemLen, buf); err != nil {
@@ -892,7 +867,7 @@ func marshalMap(info TypeInfo, value interface{}) ([]byte, error) {
 		}
 		itemLen = len(item)
 		// Set the value to null for supported protocols
-		if item == nil && mapInfo.proto > protoVersion2 {
+		if item == nil {
 			itemLen = -1
 		}
 		if err := writeCollectionSize(mapInfo, itemLen, buf); err != nil {
@@ -1069,7 +1044,7 @@ func marshalTuple(info TypeInfo, value interface{}) ([]byte, error) {
 		var buf []byte
 		for i, elem := range v {
 			if elem == nil {
-				buf = appendInt(buf, int32(-1))
+				buf = appendIntNeg1(buf)
 				continue
 			}
 
@@ -1101,7 +1076,7 @@ func marshalTuple(info TypeInfo, value interface{}) ([]byte, error) {
 			field := rv.Field(i)
 
 			if field.Kind() == reflect.Ptr && field.IsNil() {
-				buf = appendInt(buf, int32(-1))
+				buf = appendIntNeg1(buf)
 				continue
 			}
 
@@ -1127,7 +1102,7 @@ func marshalTuple(info TypeInfo, value interface{}) ([]byte, error) {
 			item := rv.Index(i)
 
 			if item.Kind() == reflect.Ptr && item.IsNil() {
-				buf = appendInt(buf, int32(-1))
+				buf = appendIntNeg1(buf)
 				continue
 			}
 
@@ -1510,14 +1485,6 @@ type TypeInfo interface {
 	Version() byte
 	Custom() string
 
-	// New creates a pointer to an empty version of whatever type
-	// is referenced by the TypeInfo receiver.
-	//
-	// If there is no corresponding Go type for the CQL type, New panics.
-	//
-	// Deprecated: Use NewWithError instead.
-	New() interface{}
-
 	// NewWithError creates a pointer to an empty version of whatever type
 	// is referenced by the TypeInfo receiver.
 	//
@@ -1541,14 +1508,6 @@ func (t NativeType) NewWithError() (interface{}, error) {
 		return nil, err
 	}
 	return reflect.New(typ).Interface(), nil
-}
-
-func (t NativeType) New() interface{} {
-	val, err := t.NewWithError()
-	if err != nil {
-		panic(err.Error())
-	}
-	return val
 }
 
 func (s NativeType) Type() Type {
@@ -1592,14 +1551,6 @@ func (t CollectionType) NewWithError() (interface{}, error) {
 		return nil, err
 	}
 	return reflect.New(typ).Interface(), nil
-}
-
-func (t CollectionType) New() interface{} {
-	val, err := t.NewWithError()
-	if err != nil {
-		panic(err.Error())
-	}
-	return val
 }
 
 func (c CollectionType) String() string {
@@ -1646,14 +1597,6 @@ func (t TupleTypeInfo) NewWithError() (interface{}, error) {
 	return reflect.New(typ).Interface(), nil
 }
 
-func (t TupleTypeInfo) New() interface{} {
-	val, err := t.NewWithError()
-	if err != nil {
-		panic(err.Error())
-	}
-	return val
-}
-
 type UDTField struct {
 	Name string
 	Type TypeInfo
@@ -1681,14 +1624,6 @@ func (u UDTTypeInfo) NewWithError() (interface{}, error) {
 		return nil, err
 	}
 	return reflect.New(typ).Interface(), nil
-}
-
-func (u UDTTypeInfo) New() interface{} {
-	val, err := u.NewWithError()
-	if err != nil {
-		panic(err.Error())
-	}
-	return val
 }
 
 func (u UDTTypeInfo) String() string {

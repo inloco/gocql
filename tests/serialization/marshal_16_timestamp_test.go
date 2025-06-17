@@ -15,6 +15,8 @@ import (
 )
 
 func TestMarshalsTimestamp(t *testing.T) {
+	t.Parallel()
+
 	tType := gocql.NewNativeType(4, gocql.TypeTimestamp, "")
 
 	type testSuite struct {
@@ -47,6 +49,8 @@ func TestMarshalsTimestamp(t *testing.T) {
 		unmarshal := tSuite.unmarshal
 
 		t.Run(tSuite.name, func(t *testing.T) {
+			t.Parallel()
+
 			serialization.PositiveSet{
 				Data: nil,
 				Values: mod.Values{
@@ -57,14 +61,14 @@ func TestMarshalsTimestamp(t *testing.T) {
 			serialization.PositiveSet{
 				Data: nil,
 				Values: mod.Values{
-					int64(0), zeroTimestamp,
+					int64(0), time.Time{},
 				}.AddVariants(mod.CustomType),
 			}.Run("[nil]unmarshal", t, nil, unmarshal)
 
 			serialization.PositiveSet{
 				Data: make([]byte, 0),
 				Values: mod.Values{
-					int64(0), zeroTimestamp,
+					int64(0), time.Time{},
 				}.AddVariants(mod.All...),
 			}.Run("[]unmarshal", t, nil, unmarshal)
 

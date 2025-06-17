@@ -33,13 +33,19 @@ import (
 )
 
 func TestUnmarshalCassVersion(t *testing.T) {
+	t.Parallel()
+
 	tests := [...]struct {
 		data    string
 		version cassVersion
 	}{
-		{"3.2", cassVersion{3, 2, 0}},
-		{"2.10.1-SNAPSHOT", cassVersion{2, 10, 1}},
-		{"1.2.3", cassVersion{1, 2, 3}},
+		{"3.2", cassVersion{3, 2, 0, ""}},
+		{"2.10.1-SNAPSHOT", cassVersion{2, 10, 1, ""}},
+		{"1.2.3", cassVersion{1, 2, 3, ""}},
+		{"4.0-rc2", cassVersion{4, 0, 0, "rc2"}},
+		{"4.3.2-rc1", cassVersion{4, 3, 2, "rc1"}},
+		{"4.3.2-rc1-qualifier1", cassVersion{4, 3, 2, "rc1-qualifier1"}},
+		{"4.3-rc1-qualifier1", cassVersion{4, 3, 0, "rc1-qualifier1"}},
 	}
 
 	for i, test := range tests {
@@ -53,17 +59,22 @@ func TestUnmarshalCassVersion(t *testing.T) {
 }
 
 func TestCassVersionBefore(t *testing.T) {
+	t.Parallel()
+
 	tests := [...]struct {
 		version             cassVersion
 		major, minor, patch int
+		Qualifier           string
 	}{
-		{cassVersion{1, 0, 0}, 0, 0, 0},
-		{cassVersion{0, 1, 0}, 0, 0, 0},
-		{cassVersion{0, 0, 1}, 0, 0, 0},
+		{cassVersion{1, 0, 0, ""}, 0, 0, 0, ""},
+		{cassVersion{0, 1, 0, ""}, 0, 0, 0, ""},
+		{cassVersion{0, 0, 1, ""}, 0, 0, 0, ""},
 
-		{cassVersion{1, 0, 0}, 0, 1, 0},
-		{cassVersion{0, 1, 0}, 0, 0, 1},
-		{cassVersion{4, 1, 0}, 3, 1, 2},
+		{cassVersion{1, 0, 0, ""}, 0, 1, 0, ""},
+		{cassVersion{0, 1, 0, ""}, 0, 0, 1, ""},
+		{cassVersion{4, 1, 0, ""}, 3, 1, 2, ""},
+
+		{cassVersion{4, 1, 0, ""}, 3, 1, 2, ""},
 	}
 
 	for i, test := range tests {
@@ -75,6 +86,8 @@ func TestCassVersionBefore(t *testing.T) {
 }
 
 func TestIsValidPeer(t *testing.T) {
+	t.Parallel()
+
 	host := &HostInfo{
 		rpcAddress: net.ParseIP("0.0.0.0"),
 		rack:       "myRack",
@@ -94,6 +107,8 @@ func TestIsValidPeer(t *testing.T) {
 }
 
 func TestIsZeroToken(t *testing.T) {
+	t.Parallel()
+
 	host := &HostInfo{
 		rpcAddress: net.ParseIP("0.0.0.0"),
 		rack:       "myRack",
@@ -113,6 +128,8 @@ func TestIsZeroToken(t *testing.T) {
 }
 
 func TestHostInfo_ConnectAddress(t *testing.T) {
+	t.Parallel()
+
 	var localhost = net.IPv4(127, 0, 0, 1)
 	tests := []struct {
 		name          string

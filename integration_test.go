@@ -31,6 +31,7 @@ package gocql
 import (
 	"context"
 	"errors"
+	"github.com/gocql/gocql/internal/tests"
 	"reflect"
 	"testing"
 	"time"
@@ -38,10 +39,6 @@ import (
 
 // TestAuthentication verifies that gocql will work with a host configured to only accept authenticated connections
 func TestAuthentication(t *testing.T) {
-
-	if *flagProto < 2 {
-		t.Skip("Authentication is not supported with protocol < 2")
-	}
 
 	if !*flagRunAuthTest {
 		t.Skip("Authentication is not configured in the target cluster")
@@ -70,9 +67,9 @@ func TestGetHostsFromSystem(t *testing.T) {
 
 	hosts, partitioner, err := session.hostSource.GetHostsFromSystem()
 
-	assertTrue(t, "err == nil", err == nil)
-	assertEqual(t, "len(hosts)", len(clusterHosts), len(hosts))
-	assertTrue(t, "len(partitioner) != 0", len(partitioner) != 0)
+	tests.AssertTrue(t, "err == nil", err == nil)
+	tests.AssertEqual(t, "len(hosts)", len(clusterHosts), len(hosts))
+	tests.AssertTrue(t, "len(partitioner) != 0", len(partitioner) != 0)
 }
 
 // TestRingDiscovery makes sure that you can autodiscover other cluster members
@@ -124,7 +121,7 @@ func TestHostFilterDiscovery(t *testing.T) {
 	session := createSessionFromCluster(cluster, t)
 	defer session.Close()
 
-	assertEqual(t, "len(clusterHosts)-1 != len(rr.hosts.get())", len(clusterHosts)-1, len(rr.hosts.get()))
+	tests.AssertEqual(t, "len(clusterHosts)-1 != len(rr.hosts.get())", len(clusterHosts)-1, len(rr.hosts.get()))
 }
 
 // TestHostFilterInitial ensures that host filtering works for the initial
@@ -148,7 +145,110 @@ func TestHostFilterInitial(t *testing.T) {
 	session := createSessionFromCluster(cluster, t)
 	defer session.Close()
 
-	assertEqual(t, "len(clusterHosts)-1 != len(rr.hosts.get())", len(clusterHosts)-1, len(rr.hosts.get()))
+	tests.AssertEqual(t, "len(clusterHosts)-1 != len(rr.hosts.get())", len(clusterHosts)-1, len(rr.hosts.get()))
+}
+
+func TestApplicationInformation(t *testing.T) {
+	cluster := createCluster()
+	s, err := cluster.CreateSession()
+	if err != nil {
+		t.Fatalf("ApplicationInformation error: %s", err)
+	}
+	var clientsTableName string
+	for _, tableName := range []string{"system_views.clients", "system.clients"} {
+		iter := s.Query("select client_options from " + tableName).Iter()
+		_, err = iter.SliceMap()
+		if err == nil {
+			clientsTableName = tableName
+			break
+		}
+	}
+
+	if clientsTableName == "" {
+		t.Skip("Skipping because server does have `client_options` in clients table")
+	}
+
+	tcases := []struct {
+		testName string
+		name     string
+		version  string
+		clientID string
+	}{
+		{
+			testName: "full",
+			name:     "my-application",
+			version:  "1.0.0",
+			clientID: "my-client-id",
+		},
+		{
+			testName: "empty",
+		},
+		{
+			testName: "name-only",
+			name:     "my-application",
+		},
+		{
+			testName: "version-only",
+			version:  "1.0.0",
+		},
+		{
+			testName: "client-id-only",
+			clientID: "my-client-id",
+		},
+	}
+	for _, tcase := range tcases {
+		t.Run(tcase.testName, func(t *testing.T) {
+			cluster := createCluster()
+			cluster.ApplicationInfo = NewStaticApplicationInfo(tcase.name, tcase.version, tcase.clientID)
+			s, err := cluster.CreateSession()
+			if err != nil {
+				t.Fatalf("failed to connect to the cluster: %s", err)
+			}
+			defer s.Close()
+
+			var row map[string]string
+			iter := s.Query("select client_options from " + clientsTableName).Iter()
+			found := false
+			for iter.Scan(&row) {
+				if tcase.name != "" {
+					if row["APPLICATION_NAME"] != tcase.name {
+						continue
+					}
+				} else {
+					if _, ok := row["APPLICATION_NAME"]; ok {
+						continue
+					}
+				}
+				if tcase.version != "" {
+					if row["APPLICATION_VERSION"] != tcase.version {
+						continue
+					}
+				} else {
+					if _, ok := row["APPLICATION_VERSION"]; ok {
+						continue
+					}
+				}
+				if tcase.clientID != "" {
+					if row["CLIENT_ID"] != tcase.clientID {
+						continue
+					}
+				} else {
+					if _, ok := row["CLIENT_ID"]; ok {
+						continue
+					}
+				}
+				found = true
+				break
+			}
+			if iter.Close() != nil {
+				t.Fatalf("failed to execute query: %s", iter.Close().Error())
+			}
+			if !found {
+				t.Fatalf("failed to find the application info row")
+			}
+		})
+	}
+
 }
 
 func TestWriteFailure(t *testing.T) {
@@ -167,7 +267,7 @@ func TestWriteFailure(t *testing.T) {
 	if err := session.Query(`INSERT INTO test.test (id, value) VALUES (1, 1)`).Exec(); err != nil {
 		errWrite, ok := err.(*RequestErrWriteFailure)
 		if ok {
-			if session.cfg.ProtoVersion >= 5 {
+			if session.cfg.ProtoVersion >= protoVersion5 {
 				// ErrorMap should be filled with some hosts that should've errored
 				if len(errWrite.ErrorMap) == 0 {
 					t.Fatal("errWrite.ErrorMap should have some failed hosts but it didn't have any")

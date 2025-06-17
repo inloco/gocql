@@ -33,6 +33,7 @@ import (
 	"context"
 	"crypto/tls"
 	"crypto/x509"
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"io"
@@ -53,8 +54,14 @@ import (
 )
 
 const (
-	defaultProto = protoVersion2
+	defaultProto = protoVersion3
 )
+
+type brokenDNSResolver struct{}
+
+func (b brokenDNSResolver) LookupIP(host string) ([]net.IP, error) {
+	return nil, &net.DNSError{}
+}
 
 func TestApprove(t *testing.T) {
 	tests := map[bool]bool{
@@ -99,6 +106,7 @@ func testCluster(proto protoVersion, addresses ...string) *ClusterConfig {
 	cluster := NewCluster(addresses...)
 	cluster.ProtoVersion = int(proto)
 	cluster.disableControlConn = true
+	cluster.PoolConfig.HostSelectionPolicy = RoundRobinHostPolicy()
 	return cluster
 }
 
@@ -183,12 +191,12 @@ func newTestSession(proto protoVersion, addresses ...string) (*Session, error) {
 	return testCluster(proto, addresses...).CreateSession()
 }
 
+var _ DNSResolver = brokenDNSResolver{}
+
 func TestDNSLookupConnected(t *testing.T) {
 	log := &testLogger{}
 
 	// Override the defaul DNS resolver and restore at the end
-	failDNS = true
-	defer func() { failDNS = false }()
 
 	srv := NewTestServer(t, defaultProto, context.Background())
 	defer srv.Stop()
@@ -197,6 +205,7 @@ func TestDNSLookupConnected(t *testing.T) {
 	cluster.Logger = log
 	cluster.ProtoVersion = int(defaultProto)
 	cluster.disableControlConn = true
+	cluster.DNSResolver = brokenDNSResolver{}
 
 	// CreateSession() should attempt to resolve the DNS name "cassandraX.invalid"
 	// and fail, but continue to connect via srv.Address
@@ -214,13 +223,12 @@ func TestDNSLookupError(t *testing.T) {
 	log := &testLogger{}
 
 	// Override the defaul DNS resolver and restore at the end
-	failDNS = true
-	defer func() { failDNS = false }()
 
 	cluster := NewCluster("cassandra1.invalid", "cassandra2.invalid")
 	cluster.Logger = log
 	cluster.ProtoVersion = int(defaultProto)
 	cluster.disableControlConn = true
+	cluster.DNSResolver = brokenDNSResolver{}
 
 	// CreateSession() should attempt to resolve each DNS name "cassandraX.invalid"
 	// and fail since it could not resolve any dns entries
@@ -335,15 +343,16 @@ func TestCancel(t *testing.T) {
 	wg.Add(1)
 
 	go func() {
-		if err := qry.Exec(); !errors.Is(err, context.Canceled) {
-			t.Fatalf("expected to get context cancel error: '%v', got '%v'", context.Canceled, err)
-		}
+		err = qry.Exec()
 		wg.Done()
 	}()
-
 	// The query will timeout after about 1 seconds, so cancel it after a short pause
 	time.AfterFunc(20*time.Millisecond, cancel)
 	wg.Wait()
+
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("expected to get context cancel error: '%v', got '%v'", context.Canceled, err)
+	}
 }
 
 type testQueryObserver struct {
@@ -438,13 +447,19 @@ func TestQueryMultinodeWithMetrics(t *testing.T) {
 	// 1 retry per host
 	rt := &SimpleRetryPolicy{NumRetries: 3}
 	observer := &testQueryObserver{metrics: make(map[string]*hostMetrics), verbose: false, logger: log}
-	qry := db.Query("kill").RetryPolicy(rt).Observer(observer)
+	qry := db.Query("kill").RetryPolicy(rt).Observer(observer).Idempotent(true)
 	if err := qry.Exec(); err == nil {
 		t.Fatalf("expected error")
 	}
 
 	for i, ip := range addresses {
-		host := &HostInfo{connectAddress: net.ParseIP(ip)}
+		var host *HostInfo
+		for _, clusterHost := range db.GetHosts() {
+			if clusterHost.connectAddress.String() == ip {
+				host = clusterHost
+			}
+		}
+
 		queryMetric := qry.metrics.hostMetrics(host)
 		observedMetrics := observer.GetMetrics(host)
 
@@ -614,7 +629,7 @@ func BenchmarkSingleConn(b *testing.B) {
 	srv := NewTestServer(b, 3, context.Background())
 	defer srv.Stop()
 
-	cluster := testCluster(3, srv.Address)
+	cluster := testCluster(protoVersion3, srv.Address)
 	// Set the timeout arbitrarily low so that the query hits the timeout in a
 	// timely manner.
 	cluster.Timeout = 500 * time.Millisecond
@@ -718,7 +733,7 @@ func TestStream0(t *testing.T) {
 
 	conn := &Conn{
 		r:       bufio.NewReader(&buf),
-		streams: streams.New(protoVersion4),
+		streams: streams.New(),
 		logger:  &defaultLogger{},
 	}
 
@@ -794,17 +809,17 @@ func TestInitialRetryPolicy(t *testing.T) {
 			ExpectedErr:              "gocql: unable to create session: unable to connect to the cluster, last error: unable to discover protocol version:"},
 		{
 			NumRetries:               1,
-			ProtoVersion:             4,
+			ProtoVersion:             protoVersion4,
 			ExpectedGetIntervalCalls: nil,
 			ExpectedErr:              "gocql: unable to create session: unable to connect to the cluster, last error: unable to create control connection: unable to connect to initial hosts:"},
 		{
 			NumRetries:               2,
-			ProtoVersion:             4,
+			ProtoVersion:             protoVersion4,
 			ExpectedGetIntervalCalls: []int{1},
 			ExpectedErr:              "gocql: unable to create session: unable to connect to the cluster, last error: unable to create control connection: unable to connect to initial hosts:"},
 		{
 			NumRetries:               3,
-			ProtoVersion:             4,
+			ProtoVersion:             protoVersion4,
 			ExpectedGetIntervalCalls: []int{1, 2},
 			ExpectedErr:              "gocql: unable to create session: unable to connect to the cluster, last error: unable to create control connection: unable to connect to initial hosts:"},
 	}
@@ -1037,6 +1052,31 @@ func TestWriteCoalescing_WriteAfterClose(t *testing.T) {
 	}
 }
 
+func TestSkipMetadata(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	srv := NewTestServer(t, protoVersion4, ctx)
+	defer srv.Stop()
+
+	cfg := testCluster(protoVersion4, srv.Address)
+	cfg.DisableSkipMetadata = false
+
+	db, err := cfg.CreateSession()
+	if err != nil {
+		t.Fatalf("NewCluster: %v", err)
+	}
+	defer db.Close()
+
+	if err := db.Query("select nometadata").Exec(); err != nil {
+		t.Fatalf("expected no error got: %v", err)
+	}
+
+	if err := db.Query("select metadata").Exec(); err != nil {
+		t.Fatalf("expected no error got: %v", err)
+	}
+}
+
 type recordingFrameHeaderObserver struct {
 	t      *testing.T
 	mu     sync.Mutex
@@ -1123,10 +1163,7 @@ func (nts newTestServerOpts) newServer(t testing.TB, ctx context.Context) *TestS
 		t.Fatal(err)
 	}
 
-	headerSize := 8
-	if nts.protocol > protoVersion2 {
-		headerSize = 9
-	}
+	headerSize := 9
 
 	ctx, cancel := context.WithCancel(ctx)
 	srv := &TestServer{
@@ -1175,10 +1212,7 @@ func NewSSLTestServerWithSupportedFactory(t testing.TB, protocol uint8, ctx cont
 		t.Fatal(err)
 	}
 
-	headerSize := 8
-	if protocol > protoVersion2 {
-		headerSize = 9
-	}
+	headerSize := 9
 
 	ctx, cancel := context.WithCancel(ctx)
 	srv := &TestServer{
@@ -1225,7 +1259,7 @@ func (srv *TestServer) session() (*Session, error) {
 }
 
 func (srv *TestServer) host() *HostInfo {
-	hosts, err := hostInfo(srv.Address, 9042)
+	hosts, err := hostInfo(nil, nil, srv.Address, 9042)
 	if err != nil {
 		srv.t.Fatal(err)
 	}
@@ -1385,6 +1419,99 @@ func (srv *TestServer) process(conn net.Conn, reqFrame *framer, exts map[string]
 	case opError:
 		respFrame.writeHeader(0, opError, head.stream)
 		respFrame.buf = append(respFrame.buf, reqFrame.buf...)
+	case opPrepare:
+		query := reqFrame.readLongString()
+		name := strings.TrimPrefix(query, "select ")
+		if n := strings.Index(name, " "); n > 0 {
+			name = name[:n]
+		}
+		switch strings.ToLower(name) {
+		case "nometadata":
+			respFrame.writeHeader(0, opResult, head.stream)
+			respFrame.writeInt(resultKindPrepared)
+			// <id>
+			respFrame.writeShortBytes(binary.BigEndian.AppendUint64(nil, 1))
+			// <metadata>
+			respFrame.writeInt(0) // <flags>
+			respFrame.writeInt(0) // <columns_count>
+			if srv.protocol >= protoVersion4 {
+				respFrame.writeInt(0) // <pk_count>
+			}
+			// <result_metadata>
+			respFrame.writeInt(int32(flagNoMetaData)) // <flags>
+			respFrame.writeInt(0)
+		case "metadata":
+			respFrame.writeHeader(0, opResult, head.stream)
+			respFrame.writeInt(resultKindPrepared)
+			// <id>
+			respFrame.writeShortBytes(binary.BigEndian.AppendUint64(nil, 2))
+			// <metadata>
+			respFrame.writeInt(0) // <flags>
+			respFrame.writeInt(0) // <columns_count>
+			if srv.protocol >= protoVersion4 {
+				respFrame.writeInt(0) // <pk_count>
+			}
+			// <result_metadata>
+			respFrame.writeInt(int32(flagGlobalTableSpec)) // <flags>
+			respFrame.writeInt(1)                          // <columns_count>
+			// <global_table_spec>
+			respFrame.writeString("keyspace")
+			respFrame.writeString("table")
+			// <col_spec_0>
+			respFrame.writeString("col0")             // <name>
+			respFrame.writeShort(uint16(TypeBoolean)) // <type>
+		default:
+			respFrame.writeHeader(0, opError, head.stream)
+			respFrame.writeInt(0)
+			respFrame.writeString("unsupported query: " + name)
+		}
+	case opExecute:
+		b := reqFrame.readShortBytes()
+		id := binary.BigEndian.Uint64(b)
+		// <query_parameters>
+		reqFrame.readConsistency() // <consistency>
+		var flags byte
+		if srv.protocol > protoVersion4 {
+			ui := reqFrame.readInt()
+			flags = byte(ui)
+		} else {
+			flags = reqFrame.readByte()
+		}
+		switch id {
+		case 1:
+			if flags&flagSkipMetaData != 0 {
+				respFrame.writeHeader(0, opError, head.stream)
+				respFrame.writeInt(0)
+				respFrame.writeString("skip metadata unexpected")
+			} else {
+				respFrame.writeHeader(0, opResult, head.stream)
+				respFrame.writeInt(resultKindRows)
+				// <metadata>
+				respFrame.writeInt(0) // <flags>
+				respFrame.writeInt(0) // <columns_count>
+				// <rows_count>
+				respFrame.writeInt(0)
+			}
+		case 2:
+			if flags&flagSkipMetaData != 0 {
+				respFrame.writeHeader(0, opResult, head.stream)
+				respFrame.writeInt(resultKindRows)
+				// <metadata>
+				respFrame.writeInt(0) // <flags>
+				respFrame.writeInt(0) // <columns_count>
+				// <rows_count>
+				respFrame.writeInt(0)
+			} else {
+				respFrame.writeHeader(0, opError, head.stream)
+				respFrame.writeInt(0)
+				respFrame.writeString("skip metadata expected")
+			}
+		default:
+			respFrame.writeHeader(0, opError, head.stream)
+			respFrame.writeInt(ErrCodeUnprepared)
+			respFrame.writeString("unprepared")
+			respFrame.writeShortBytes(binary.BigEndian.AppendUint64(nil, id))
+		}
 	default:
 		respFrame.writeHeader(0, opError, head.stream)
 		respFrame.writeInt(0)
@@ -1427,39 +1554,27 @@ func (srv *TestServer) readFrame(conn net.Conn) (*framer, error) {
 
 func TestGetSchemaAgreement(t *testing.T) {
 	schema_version1 := ParseUUIDMust("af810386-a694-11ef-81fa-3aea73156247")
-	peersRows := []map[string]interface{}{
+	peersRows := []schemaAgreementHost{
 		{
-			"data_center":     "datacenter1",
-			"host_id":         ParseUUIDMust("b2035fd9-e0ca-4857-8c45-e63c00fb7c43"),
-			"peer":            "127.0.0.3",
-			"preferred_ip":    "127.0.0.3",
-			"rack":            "rack1",
-			"release_version": "3.0.8",
-			"rpc_address":     "127.0.0.3",
-			"schema_version":  schema_version1,
-			"tokens":          []string{"-1296227678594315580994457470329811265"},
+			DataCenter:    "datacenter1",
+			HostID:        ParseUUIDMust("b2035fd9-e0ca-4857-8c45-e63c00fb7c43"),
+			Rack:          "rack1",
+			RPCAddress:    "127.0.0.3",
+			SchemaVersion: schema_version1,
 		},
 		{
-			"data_center":     "datacenter1",
-			"host_id":         ParseUUIDMust("4b21ee4c-acea-4267-8e20-aaed5361a0dd"),
-			"peer":            "127.0.0.2",
-			"preferred_ip":    "127.0.0.2",
-			"rack":            "rack1",
-			"release_version": "3.0.8",
-			"rpc_address":     "127.0.0.2",
-			"schema_version":  schema_version1,
-			"tokens":          []string{"-1129762924682054333"},
+			DataCenter:    "datacenter1",
+			HostID:        ParseUUIDMust("4b21ee4c-acea-4267-8e20-aaed5361a0dd"),
+			Rack:          "rack1",
+			RPCAddress:    "127.0.0.2",
+			SchemaVersion: schema_version1,
 		},
 		{
-			"data_center":     "datacenter2",
-			"host_id":         ParseUUIDMust("dfef4a22-b8d8-47e9-aee5-8c19d4b7a9e3"),
-			"peer":            "127.0.0.5",
-			"preferred_ip":    "127.0.0.5",
-			"rack":            "rack1",
-			"release_version": "3.0.8",
-			"rpc_address":     "127.0.0.5",
-			"schema_version":  ParseUUIDMust("875a938a-a695-11ef-4314-85c8ef0ebaa2"),
-			"tokens":          []string{},
+			DataCenter:    "datacenter2",
+			HostID:        ParseUUIDMust("dfef4a22-b8d8-47e9-aee5-8c19d4b7a9e3"),
+			Rack:          "rack1",
+			RPCAddress:    "127.0.0.5",
+			SchemaVersion: ParseUUIDMust("875a938a-a695-11ef-4314-85c8ef0ebaa2"),
 		},
 	}
 
@@ -1496,7 +1611,7 @@ func TestGetSchemaAgreement(t *testing.T) {
 	})
 
 	t.Run("SchemaConsistent", func(t *testing.T) {
-		peersRows[2]["schema_version"] = schema_version1
+		peersRows[2].SchemaVersion = schema_version1
 		err := getSchemaAgreement(
 			[]string{"af810386-a694-11ef-81fa-3aea73156247"},
 			peersRows,

@@ -26,6 +26,7 @@ package gocql
 
 import (
 	"fmt"
+	"github.com/gocql/gocql/tablets"
 	"math/rand"
 	"net"
 	"sync"
@@ -46,7 +47,7 @@ type SetPartitioner interface {
 
 // interface to implement to receive the tablets value
 type SetTablets interface {
-	SetTablets(tablets TabletInfoList)
+	SetTablets(tablets tablets.TabletInfoList)
 }
 
 type policyConnPool struct {
@@ -190,6 +191,13 @@ func (p *policyConnPool) Size() int {
 
 func (p *policyConnPool) getPool(host *HostInfo) (pool *hostConnPool, ok bool) {
 	hostID := host.HostID()
+	p.mu.RLock()
+	pool, ok = p.hostConnPools[hostID]
+	p.mu.RUnlock()
+	return
+}
+
+func (p *policyConnPool) getPoolByHostID(hostID string) (pool *hostConnPool, ok bool) {
 	p.mu.RLock()
 	pool, ok = p.hostConnPools[hostID]
 	p.mu.RUnlock()
@@ -549,7 +557,7 @@ func (pool *hostConnPool) initConnPicker(conn *Conn) {
 	}
 
 	if conn.isScyllaConn() {
-		pool.connPicker = newScyllaConnPicker(conn)
+		pool.connPicker = newScyllaConnPicker(conn, pool.logger)
 		return
 	}
 

@@ -11,6 +11,9 @@ import (
 
 // Check if TokenAwareHostPolicy works correctly when using tablets
 func TestTablets(t *testing.T) {
+	if !isTabletsSupported() {
+		t.Skip("Tablets are not supported by this server")
+	}
 	cluster := createCluster()
 
 	fallback := RoundRobinHostPolicy()
@@ -21,7 +24,7 @@ func TestTablets(t *testing.T) {
 
 	if err := createTable(session, fmt.Sprintf(`CREATE TABLE %s (pk int, ck int, v int, PRIMARY KEY (pk, ck));
 	`, "test_tablets")); err != nil {
-		panic(fmt.Sprintf("unable to create table: %v", err))
+		t.Fatalf("unable to create table: %v", err)
 	}
 
 	hosts := session.hostSource.getHostsList()
@@ -101,6 +104,9 @@ func TestTablets(t *testing.T) {
 
 // Check if shard awareness works correctly when using tablets
 func TestTabletsShardAwareness(t *testing.T) {
+	if !isTabletsSupported() {
+		t.Skip("Tablets are not supported by this server")
+	}
 	cluster := createCluster()
 
 	fallback := RoundRobinHostPolicy()
@@ -111,7 +117,7 @@ func TestTabletsShardAwareness(t *testing.T) {
 
 	if err := createTable(session, fmt.Sprintf(`CREATE TABLE %s (pk int, ck int, v int, PRIMARY KEY (pk, ck));
 	`, "test_tablets_shard_awarness")); err != nil {
-		panic(fmt.Sprintf("unable to create table: %v", err))
+		t.Fatalf("unable to create table: %v", err)
 	}
 
 	ctx := context.Background()

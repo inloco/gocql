@@ -53,18 +53,24 @@ func DenyAllFilter() HostFilter {
 	})
 }
 
-// DataCentreHostFilter filters all hosts such that they are in the same data centre
-// as the supplied data centre.
-func DataCentreHostFilter(dataCentre string) HostFilter {
+// DataCenterHostFilter filters all hosts such that they are in the same data center
+// as the supplied data center.
+func DataCenterHostFilter(dataCenter string) HostFilter {
 	return HostFilterFunc(func(host *HostInfo) bool {
-		return host.DataCenter() == dataCentre
+		return host.DataCenter() == dataCenter
 	})
+}
+
+// Deprecated: Use DataCenterHostFilter instead.
+// DataCentreHostFilter is an alias that doesn't use the preferred spelling.
+func DataCentreHostFilter(dataCenter string) HostFilter {
+	return DataCenterHostFilter(dataCenter)
 }
 
 // WhiteListHostFilter filters incoming hosts by checking that their address is
 // in the initial hosts whitelist.
 func WhiteListHostFilter(hosts ...string) HostFilter {
-	hostInfos, err := addrsToHosts(hosts, 9042, nopLogger{})
+	hostInfos, err := addrsToHosts(defaultDnsResolver, nil, hosts, 9042, nopLogger{})
 	if err != nil {
 		// dont want to panic here, but rather not break the API
 		panic(fmt.Errorf("unable to lookup host info from address: %v", err))

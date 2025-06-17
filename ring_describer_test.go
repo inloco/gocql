@@ -6,6 +6,7 @@ package gocql
 import (
 	"context"
 	"fmt"
+	"github.com/gocql/gocql/internal/tests"
 	"net"
 	"testing"
 
@@ -13,6 +14,8 @@ import (
 )
 
 func TestGetClusterPeerInfoZeroToken(t *testing.T) {
+	t.Parallel()
+
 	schema_version1 := ParseUUIDMust("af810386-a694-11ef-81fa-3aea73156247")
 
 	peersRows := []map[string]interface{}{
@@ -67,7 +70,7 @@ func TestGetClusterPeerInfoZeroToken(t *testing.T) {
 		if err != nil {
 			t.Fatalf("unable to get peers: %v", err)
 		}
-		assertEqual(t, "peers length", 2, len(peers))
+		tests.AssertEqual(t, "peers length", 2, len(peers))
 	})
 
 	t.Run("NoZeroTokenNodes", func(t *testing.T) {
@@ -82,7 +85,7 @@ func TestGetClusterPeerInfoZeroToken(t *testing.T) {
 		if err != nil {
 			t.Fatalf("unable to get peers: %v", err)
 		}
-		assertEqual(t, "peers length", 3, len(peers))
+		tests.AssertEqual(t, "peers length", 3, len(peers))
 	})
 }
 
@@ -103,99 +106,99 @@ var systemLocalResultMetadata = resultMetadata{
 		Keyspace: "system",
 		Table:    "local",
 		Name:     "key",
-		TypeInfo: NativeType{proto: 4, typ: TypeVarchar},
+		TypeInfo: NativeType{proto: protoVersion4, typ: TypeVarchar},
 	}, {
 		Keyspace: "system",
 		Table:    "local",
 		Name:     "bootstrapped",
-		TypeInfo: NativeType{proto: 4, typ: TypeVarchar},
+		TypeInfo: NativeType{proto: protoVersion4, typ: TypeVarchar},
 	}, {
 		Keyspace: "system",
 		Table:    "local",
 		Name:     "broadcast_address",
-		TypeInfo: NativeType{proto: 4, typ: TypeInet},
+		TypeInfo: NativeType{proto: protoVersion4, typ: TypeInet},
 	}, {
 		Keyspace: "system",
 		Table:    "local",
 		Name:     "cluster_name",
-		TypeInfo: NativeType{proto: 4, typ: TypeVarchar},
+		TypeInfo: NativeType{proto: protoVersion4, typ: TypeVarchar},
 	}, {
 		Keyspace: "system",
 		Table:    "local",
 		Name:     "cql_version",
-		TypeInfo: NativeType{proto: 4, typ: TypeVarchar},
+		TypeInfo: NativeType{proto: protoVersion4, typ: TypeVarchar},
 	}, {
 		Keyspace: "system",
 		Table:    "local",
 		Name:     "data_center",
-		TypeInfo: NativeType{proto: 4, typ: TypeVarchar},
+		TypeInfo: NativeType{proto: protoVersion4, typ: TypeVarchar},
 	}, {
 		Keyspace: "system",
 		Table:    "local",
 		Name:     "gossip_generation",
-		TypeInfo: NativeType{proto: 4, typ: TypeInt},
+		TypeInfo: NativeType{proto: protoVersion4, typ: TypeInt},
 	}, {
 		Keyspace: "system",
 		Table:    "local",
 		Name:     "host_id",
-		TypeInfo: NativeType{proto: 4, typ: TypeUUID},
+		TypeInfo: NativeType{proto: protoVersion4, typ: TypeUUID},
 	}, {
 		Keyspace: "system",
 		Table:    "local",
 		Name:     "listen_address",
-		TypeInfo: NativeType{proto: 4, typ: TypeInet},
+		TypeInfo: NativeType{proto: protoVersion4, typ: TypeInet},
 	}, {
 		Keyspace: "system",
 		Table:    "local",
 		Name:     "native_protocol_version",
-		TypeInfo: NativeType{proto: 4, typ: TypeVarchar},
+		TypeInfo: NativeType{proto: protoVersion4, typ: TypeVarchar},
 	}, {
 		Keyspace: "system",
 		Table:    "local",
 		Name:     "partitioner",
-		TypeInfo: NativeType{proto: 4, typ: TypeVarchar},
+		TypeInfo: NativeType{proto: protoVersion4, typ: TypeVarchar},
 	}, {
 		Keyspace: "system",
 		Table:    "local",
 		Name:     "rack",
-		TypeInfo: NativeType{proto: 4, typ: TypeVarchar},
+		TypeInfo: NativeType{proto: protoVersion4, typ: TypeVarchar},
 	}, {
 		Keyspace: "system",
 		Table:    "local",
 		Name:     "release_version",
-		TypeInfo: NativeType{proto: 4, typ: TypeVarchar},
+		TypeInfo: NativeType{proto: protoVersion4, typ: TypeVarchar},
 	}, {
 		Keyspace: "system",
 		Table:    "local",
 		Name:     "rpc_address",
-		TypeInfo: NativeType{proto: 4, typ: TypeInet},
+		TypeInfo: NativeType{proto: protoVersion4, typ: TypeInet},
 	}, {
 		Keyspace: "system",
 		Table:    "local",
 		Name:     "schema_version",
-		TypeInfo: NativeType{proto: 4, typ: TypeUUID},
+		TypeInfo: NativeType{proto: protoVersion4, typ: TypeUUID},
 	}, {
 		Keyspace: "system",
 		Table:    "local",
 		Name:     "supported_features",
-		TypeInfo: NativeType{proto: 4, typ: TypeVarchar},
+		TypeInfo: NativeType{proto: protoVersion4, typ: TypeVarchar},
 	}, {
 		Keyspace: "system",
 		Table:    "local",
 		Name:     "tokens",
 		TypeInfo: CollectionType{
-			NativeType: NativeType{proto: 4, typ: TypeSet},
-			Elem:       NativeType{proto: 4, typ: TypeVarchar},
+			NativeType: NativeType{proto: protoVersion4, typ: TypeSet},
+			Elem:       NativeType{proto: protoVersion4, typ: TypeVarchar},
 		},
 	}, {
 		Keyspace: "system",
 		Table:    "local",
 		Name:     "truncated_at",
 		TypeInfo: CollectionType{
-			NativeType: NativeType{proto: 4, typ: TypeMap},
+			NativeType: NativeType{proto: protoVersion4, typ: TypeMap},
 
-			Key:  NativeType{proto: 4, typ: TypeUUID},
-			Elem: NativeType{proto: 4, typ: TypeBlob},
+			Key:  NativeType{proto: protoVersion4, typ: TypeUUID},
+			Elem: NativeType{proto: protoVersion4, typ: TypeBlob},
 		},
 	}},
 }
@@ -208,54 +211,54 @@ var systemPeersResultMetadata = resultMetadata{
 		Keyspace: "system",
 		Table:    "local",
 		Name:     "peer",
-		TypeInfo: NativeType{proto: 4, typ: TypeInet},
+		TypeInfo: NativeType{proto: protoVersion4, typ: TypeInet},
 	}, {
 		Keyspace: "system",
 		Table:    "local",
 		Name:     "data_center",
-		TypeInfo: NativeType{proto: 4, typ: TypeVarchar},
+		TypeInfo: NativeType{proto: protoVersion4, typ: TypeVarchar},
 	}, {
 		Keyspace: "system",
 		Table:    "local",
 		Name:     "host_id",
-		TypeInfo: NativeType{proto: 4, typ: TypeUUID},
+		TypeInfo: NativeType{proto: protoVersion4, typ: TypeUUID},
 	}, {
 		Keyspace: "system",
 		Table:    "local",
 		Name:     "preferred_ip",
-		TypeInfo: NativeType{proto: 4, typ: TypeInet},
+		TypeInfo: NativeType{proto: protoVersion4, typ: TypeInet},
 	}, {
 		Keyspace: "system",
 		Table:    "local",
 		Name:     "rack",
-		TypeInfo: NativeType{proto: 4, typ: TypeVarchar},
+		TypeInfo: NativeType{proto: protoVersion4, typ: TypeVarchar},
 	}, {
 		Keyspace: "system",
 		Table:    "local",
 		Name:     "release_version",
-		TypeInfo: NativeType{proto: 4, typ: TypeVarchar},
+		TypeInfo: NativeType{proto: protoVersion4, typ: TypeVarchar},
 	}, {
 		Keyspace: "system",
 		Table:    "local",
 		Name:     "rpc_address",
-		TypeInfo: NativeType{proto: 4, typ: TypeInet},
+		TypeInfo: NativeType{proto: protoVersion4, typ: TypeInet},
 	}, {
 		Keyspace: "system",
 		Table:    "local",
 		Name:     "schema_version",
-		TypeInfo: NativeType{proto: 4, typ: TypeUUID},
+		TypeInfo: NativeType{proto: protoVersion4, typ: TypeUUID},
 	}, {
 		Keyspace: "system",
 		Table:    "local",
 		Name:     "supported_features",
-		TypeInfo: NativeType{proto: 4, typ: TypeVarchar},
+		TypeInfo: NativeType{proto: protoVersion4, typ: TypeVarchar},
 	}, {
 		Keyspace: "system",
 		Table:    "local",
 		Name:     "tokens",
 		TypeInfo: CollectionType{
-			NativeType: NativeType{proto: 4, typ: TypeSet},
-			Elem:       NativeType{proto: 4, typ: TypeVarchar},
+			NativeType: NativeType{proto: protoVersion4, typ: TypeSet},
+			Elem:       NativeType{proto: protoVersion4, typ: TypeVarchar},
 		},
 	}},
 }
@@ -322,7 +325,9 @@ func marshalMetadataMust(metadata resultMetadata, data []interface{}) [][]byte {
 	return res
 }
 
-func TestGetHostsFromSystem(t *testing.T) {
+func TestMockGetHostsFromSystem(t *testing.T) {
+	t.Parallel()
+
 	r := &ringDescriber{control: &mockControlConn{}, cfg: &ClusterConfig{}}
 
 	hosts, _, err := r.GetHostsFromSystem()
@@ -331,11 +336,13 @@ func TestGetHostsFromSystem(t *testing.T) {
 	}
 
 	// local host and one of the peers are zero token so only one peer should be returned with 2 tokens
-	assertEqual(t, "hosts length", 1, len(hosts))
-	assertEqual(t, "host token length", 2, len(hosts[0].tokens))
+	tests.AssertEqual(t, "hosts length", 1, len(hosts))
+	tests.AssertEqual(t, "host token length", 2, len(hosts[0].tokens))
 }
 
 func TestRing_AddHostIfMissing_Missing(t *testing.T) {
+	t.Parallel()
+
 	ring := &ringDescriber{}
 
 	host := &HostInfo{hostId: MustRandomUUID().String(), connectAddress: net.IPv4(1, 1, 1, 1)}
@@ -350,6 +357,8 @@ func TestRing_AddHostIfMissing_Missing(t *testing.T) {
 }
 
 func TestRing_AddHostIfMissing_Existing(t *testing.T) {
+	t.Parallel()
+
 	ring := &ringDescriber{}
 
 	host := &HostInfo{hostId: MustRandomUUID().String(), connectAddress: net.IPv4(1, 1, 1, 1)}
